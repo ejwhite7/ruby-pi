@@ -3,8 +3,9 @@
 # lib/ruby_pi.rb
 #
 # Main entry point for the RubyPi gem. Requiring this file loads the complete
-# public API, including configuration, error classes, and all LLM provider
-# implementations. This file also exposes module-level convenience methods for
+# public API, including configuration, error classes, all LLM provider
+# implementations, tool definitions, agent core, context management, and
+# extensions. This file also exposes module-level convenience methods for
 # configuration and model construction.
 
 require "json"
@@ -25,6 +26,27 @@ require_relative "ruby_pi/llm/gemini"
 require_relative "ruby_pi/llm/anthropic"
 require_relative "ruby_pi/llm/openai"
 require_relative "ruby_pi/llm/fallback"
+
+# Tools
+require_relative "ruby_pi/tools/schema"
+require_relative "ruby_pi/tools/definition"
+require_relative "ruby_pi/tools/registry"
+require_relative "ruby_pi/tools/result"
+require_relative "ruby_pi/tools/executor"
+
+# Agent
+require_relative "ruby_pi/agent/events"
+require_relative "ruby_pi/agent/state"
+require_relative "ruby_pi/agent/result"
+require_relative "ruby_pi/agent/loop"
+require_relative "ruby_pi/agent/core"
+
+# Context
+require_relative "ruby_pi/context/compaction"
+require_relative "ruby_pi/context/transform"
+
+# Extensions
+require_relative "ruby_pi/extensions/base"
 
 # Top-level namespace for the RubyPi framework.
 module RubyPi
