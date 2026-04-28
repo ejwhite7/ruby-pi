@@ -1,0 +1,35 @@
+# .github/workflows/ci.yml
+#
+# Continuous integration workflow for ruby-pi. Runs the RSpec test suite
+# against Ruby 3.2 and 3.3 on every push and pull request to main.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ["3.2", "3.3"]
+
+    name: Ruby ${{ matrix.ruby-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby ${{ matrix.ruby-version }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+
+      - name: Run tests
+        run: bundle exec rspec --format documentation
