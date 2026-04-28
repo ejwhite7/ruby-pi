@@ -114,11 +114,14 @@ module RubyPi
         body
       end
 
-      # Converts a tool definition hash to Anthropic's tool format.
+      # Converts a tool definition to Anthropic's tool format.
+      # Accepts either a RubyPi::Tools::Definition or a plain Hash.
       #
-      # @param tool [Hash] tool definition with :name, :description, :parameters
+      # @param tool [RubyPi::Tools::Definition, Hash] tool definition
       # @return [Hash] Anthropic tool definition
       def format_tool(tool)
+        return tool.to_anthropic_format if tool.respond_to?(:to_anthropic_format)
+
         {
           name: tool[:name] || tool["name"],
           description: tool[:description] || tool["description"] || "",

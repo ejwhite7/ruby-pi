@@ -107,11 +107,14 @@ module RubyPi
         }
       end
 
-      # Converts a tool definition hash to Gemini's function declaration format.
+      # Converts a tool definition to Gemini's function declaration format.
+      # Accepts either a RubyPi::Tools::Definition or a plain Hash.
       #
-      # @param tool [Hash] tool definition with :name, :description, :parameters
+      # @param tool [RubyPi::Tools::Definition, Hash] tool definition
       # @return [Hash] Gemini function declaration
       def format_tool(tool)
+        return tool.to_gemini_format if tool.respond_to?(:to_gemini_format)
+
         declaration = {
           name: tool[:name] || tool["name"],
           description: tool[:description] || tool["description"] || ""

@@ -100,11 +100,14 @@ module RubyPi
         }
       end
 
-      # Converts a tool definition hash to OpenAI's function tool format.
+      # Converts a tool definition to OpenAI's function tool format.
+      # Accepts either a RubyPi::Tools::Definition or a plain Hash.
       #
-      # @param tool [Hash] tool definition with :name, :description, :parameters
+      # @param tool [RubyPi::Tools::Definition, Hash] tool definition
       # @return [Hash] OpenAI tool definition
       def format_tool(tool)
+        return tool.to_openai_format if tool.respond_to?(:to_openai_format)
+
         {
           type: "function",
           function: {

@@ -4,8 +4,9 @@ PATH
     ruby-pi (0.1.0)
       concurrent-ruby (~> 1.2)
       faraday (~> 2.0)
-      faraday-net_http (~> 3.0)
+      faraday-net_http (>= 3.0, < 3.4)
       faraday-retry (~> 2.0)
+      ostruct (~> 0.6)
 
 GEM
   remote: https://rubygems.org/
@@ -31,6 +32,7 @@ GEM
     logger (1.7.0)
     net-http (0.9.1)
       uri (>= 0.11.1)
+    ostruct (0.6.3)
     public_suffix (7.0.5)
     rake (13.4.2)
     rexml (3.4.4)
