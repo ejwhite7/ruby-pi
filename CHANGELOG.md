@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-28
+
+### Changed
+
+- Rewrote gem `summary` and `description` for RubyGems search discoverability around terms like "AI agent harness", "LLM agent", "tool calling", and the supported providers
+- Declared `rubygems_mfa_required` in gemspec metadata
+
+### Fixed
+
+- Provider `format_tool` methods now accept `RubyPi::Tools::Definition` objects (not just hashes), unblocking the agent loop for any tool-using flow
+- `ostruct` declared as a runtime dependency so the gem loads on Ruby 4.x where it is no longer a default gem
+- Integration spec rewritten against the current `Agent` API; full suite green (309 examples)
+
 ## [0.1.0] - 2026-04-28
 
 ### Added

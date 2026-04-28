@@ -13,10 +13,17 @@ Gem::Specification.new do |spec|
   spec.authors       = ["RubyPi Contributors"]
   spec.email         = ["ruby-pi@example.com"]
 
-  spec.summary       = "A Ruby agent harness inspired by Pi — minimal, composable, production-ready."
-  spec.description   = "RubyPi provides idiomatic Ruby patterns for building AI agents. " \
-                        "It offers a unified interface to multiple LLM providers (Gemini, Anthropic, OpenAI) " \
-                        "with streaming support, tool calling, automatic retries, and fallback strategies."
+  spec.summary       = "AI agent harness for Ruby — build LLM agents with tool calling, " \
+                       "streaming, and a unified interface to OpenAI, Anthropic Claude, and Google Gemini."
+  spec.description   = "RubyPi is a minimal, composable AI agent harness for Ruby. " \
+                       "Build production-ready LLM agents and AI agents with a unified provider " \
+                       "interface across OpenAI, Anthropic Claude, and Google Gemini, plus first-class " \
+                       "support for tool calling (function calling), streaming responses, automatic " \
+                       "retries, provider fallback, context compaction, and a think-act-observe agent " \
+                       "loop. Anti-framework design — small, idiomatic, and explicit. Ideal for " \
+                       "building autonomous AI agents, ReAct agents, tool-using LLM agents, and " \
+                       "chatbots in Ruby."
+  spec.metadata["rubygems_mfa_required"] = "true"
   spec.homepage      = "https://github.com/ejwhite7/ruby-pi"
   spec.license       = "MIT"
 
