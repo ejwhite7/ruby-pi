@@ -261,4 +261,61 @@ RSpec.describe RubyPi::Tools::Executor do
       expect(results[0].success?).to be true
     end
   end
+
+  describe "argument key symbolization" do
+    let(:executor) { described_class.new(registry, mode: :sequential) }
+
+    it "symbolizes string-keyed arguments from LLM JSON" do
+      # Simulate what happens when the LLM returns string-keyed arguments
+      results = executor.execute([
+        { name: "fast_tool", arguments: { "input" => "from_json" } }
+      ])
+
+      expect(results[0].success?).to be true
+      expect(results[0].value).to eq({ message: "fast", input: "from_json" })
+    end
+
+    it "deep-symbolizes nested hash arguments" do
+      nested_tool = RubyPi::Tools::Definition.new(
+        name: "nested_tool",
+        description: "Reads nested args",
+        category: :test
+      ) { |args| { got: args[:outer][:inner] } }
+
+      registry.register(nested_tool)
+
+      results = executor.execute([
+        { name: "nested_tool", arguments: { "outer" => { "inner" => "deep_value" } } }
+      ])
+
+      expect(results[0].success?).to be true
+      expect(results[0].value).to eq({ got: "deep_value" })
+    end
+
+    it "symbolizes keys inside arrays" do
+      array_tool = RubyPi::Tools::Definition.new(
+        name: "array_tool",
+        description: "Reads array args",
+        category: :test
+      ) { |args| { names: args[:items].map { |i| i[:name] } } }
+
+      registry.register(array_tool)
+
+      results = executor.execute([
+        { name: "array_tool", arguments: { "items" => [{ "name" => "a" }, { "name" => "b" }] } }
+      ])
+
+      expect(results[0].success?).to be true
+      expect(results[0].value).to eq({ names: ["a", "b"] })
+    end
+
+    it "handles already-symbolized arguments without error" do
+      results = executor.execute([
+        { name: "fast_tool", arguments: { input: "already_sym" } }
+      ])
+
+      expect(results[0].success?).to be true
+      expect(results[0].value).to eq({ message: "fast", input: "already_sym" })
+    end
+  end
 end
