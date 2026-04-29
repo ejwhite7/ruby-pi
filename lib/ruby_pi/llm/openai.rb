@@ -70,6 +70,20 @@ module RubyPi
 
       # Builds the OpenAI Chat Completions request body.
       #
+      # Handles proper formatting of all message types:
+      #
+      # 1. System messages pass through with role "system" (OpenAI supports them).
+      #
+      # 2. Tool result messages (role: "tool") are formatted with the required
+      #    `tool_call_id` field so OpenAI can match them to the assistant's
+      #    tool_calls.
+      #
+      # 3. Assistant messages with `tool_calls` include the proper OpenAI
+      #    tool_calls structure: `{ id, type: "function", function: { name, arguments } }`.
+      #
+      # Structured content (Arrays, Hashes) is preserved for multimodal content
+      # blocks (e.g., vision messages with image_url content parts).
+      #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
       # @param stream [Boolean] whether streaming is enabled
@@ -91,13 +105,101 @@ module RubyPi
 
       # Converts a normalized message hash to OpenAI's message format.
       #
+      # Handles three message types:
+      # - Tool messages (role: "tool"): includes tool_call_id for result matching
+      # - Assistant messages with tool_calls: includes structured tool_calls array
+      # - Standard messages: role + content with structured content preservation
+      #
       # @param message [Hash] a message with :role and :content keys
       # @return [Hash] OpenAI-formatted message
       def format_message(message)
-        {
-          role: (message[:role] || message["role"]).to_s,
-          content: (message[:content] || message["content"]).to_s
+        role = (message[:role] || message["role"]).to_s
+        content = message[:content] || message["content"]
+
+        case role
+        when "tool"
+          # OpenAI accepts role "tool" with a required tool_call_id field
+          # to match this result back to the assistant's tool_call.
+          tool_call_id = message[:tool_call_id] || message["tool_call_id"]
+          {
+            role: "tool",
+            tool_call_id: tool_call_id || "unknown",
+            content: format_content(content)
+          }
+
+        when "assistant"
+          # Assistant messages may include tool_calls that must be preserved
+          # in OpenAI's expected format for conversation continuity.
+          build_assistant_message(message, content)
+
+        else
+          # System and user messages — preserve structured content as-is
+          # for multimodal support (vision, etc.).
+          { role: role, content: format_content(content) }
+        end
+      end
+
+      # Builds an OpenAI-formatted assistant message, including tool_calls
+      # when present. OpenAI requires tool_calls in a specific structure:
+      # `{ id, type: "function", function: { name, arguments } }` where
+      # arguments is a JSON string.
+      #
+      # @param message [Hash] internal assistant message with optional :tool_calls
+      # @param content [String, Array, Hash, nil] the message content
+      # @return [Hash] OpenAI-formatted assistant message
+      def build_assistant_message(message, content)
+        tool_calls = message[:tool_calls] || message["tool_calls"]
+
+        formatted = {
+          role: "assistant",
+          content: format_content(content)
         }
+
+        # Include tool_calls in OpenAI's expected format if present
+        if tool_calls.is_a?(Array) && !tool_calls.empty?
+          formatted[:tool_calls] = tool_calls.map do |tc|
+            tc_id = tc[:id] || tc["id"]
+            tc_name = tc[:name] || tc["name"]
+            tc_args = tc[:arguments] || tc["arguments"] || {}
+
+            # OpenAI requires arguments as a JSON string
+            args_string = if tc_args.is_a?(String)
+                            tc_args
+                          elsif tc_args.is_a?(Hash)
+                            JSON.generate(tc_args)
+                          else
+                            "{}"
+                          end
+
+            {
+              id: tc_id || "unknown",
+              type: "function",
+              function: {
+                name: tc_name || "unknown",
+                arguments: args_string
+              }
+            }
+          end
+        end
+
+        formatted
+      end
+
+      # Formats message content for the OpenAI API, preserving structured
+      # content (Arrays and Hashes) for multimodal messages (e.g., vision)
+      # and only converting simple values to strings.
+      #
+      # @param content [String, Array, Hash, nil] the raw content value
+      # @return [String, Array, Hash, nil] formatted content suitable for OpenAI
+      def format_content(content)
+        case content
+        when Array, Hash
+          content
+        when nil
+          nil
+        else
+          content.to_s
+        end
       end
 
       # Converts a tool definition to OpenAI's function tool format.

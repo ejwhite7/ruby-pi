@@ -175,9 +175,9 @@ RSpec.describe RubyPi::LLM::OpenAI do
         sse_body = <<~SSE
           data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_xyz","type":"function","function":{"name":"search","arguments":""}}]},"finish_reason":null}]}
 
-          data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\""}}]},"finish_reason":null}]}
+          data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\\"q\\\""}}]},"finish_reason":null}]}
 
-          data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"test\\"}"}}]},"finish_reason":null}]}
+          data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\\"test\\\"}"}}]},"finish_reason":null}]}
 
           data: {"id":"chatcmpl-2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
@@ -258,6 +258,106 @@ RSpec.describe RubyPi::LLM::OpenAI do
           .to_return(status: 429, body: "Too Many Requests")
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::RateLimitError)
+      end
+    end
+  end
+
+  # -----------------------------------------------------------------------
+  # build_request_body — unit tests for tool message formatting
+  # -----------------------------------------------------------------------
+  describe "#build_request_body (private)" do
+    context "full agent loop conversation with tool calls" do
+      it "correctly formats a complete tool-calling conversation" do
+        messages = [
+          { role: :system, content: "You are a helpful assistant." },
+          { role: :user, content: "What's the weather in Tokyo?" },
+          {
+            role: :assistant,
+            content: "I'll check the weather.",
+            tool_calls: [
+              { id: "call_abc", name: "get_weather", arguments: { location: "Tokyo" } }
+            ]
+          },
+          {
+            role: :tool,
+            content: '{"temp": 22}',
+            tool_call_id: "call_abc",
+            name: "get_weather"
+          },
+          { role: :user, content: "Thanks!" }
+        ]
+
+        body = provider.send(:build_request_body, messages, [], false)
+        formatted = body[:messages]
+
+        # Should have all 5 messages (OpenAI keeps system in messages array)
+        expect(formatted.length).to eq(5)
+
+        # Message 1: system
+        expect(formatted[0][:role]).to eq("system")
+        expect(formatted[0][:content]).to eq("You are a helpful assistant.")
+
+        # Message 2: user
+        expect(formatted[1][:role]).to eq("user")
+        expect(formatted[1][:content]).to eq("What's the weather in Tokyo?")
+
+        # Message 3: assistant with tool_calls
+        expect(formatted[2][:role]).to eq("assistant")
+        expect(formatted[2][:content]).to eq("I'll check the weather.")
+        expect(formatted[2][:tool_calls]).to be_an(Array)
+        expect(formatted[2][:tool_calls].length).to eq(1)
+
+        tc = formatted[2][:tool_calls][0]
+        expect(tc[:id]).to eq("call_abc")
+        expect(tc[:type]).to eq("function")
+        expect(tc[:function][:name]).to eq("get_weather")
+        expect(tc[:function][:arguments]).to eq('{"location":"Tokyo"}')
+
+        # Message 4: tool result
+        expect(formatted[3][:role]).to eq("tool")
+        expect(formatted[3][:tool_call_id]).to eq("call_abc")
+        expect(formatted[3][:content]).to eq('{"temp": 22}')
+
+        # Message 5: user follow-up
+        expect(formatted[4][:role]).to eq("user")
+        expect(formatted[4][:content]).to eq("Thanks!")
+      end
+    end
+
+    context "structured content preservation" do
+      it "passes array content through without calling .to_s" do
+        structured_content = [
+          { type: "text", text: "Describe this image:" },
+          { type: "image_url", image_url: { url: "https://example.com/img.png" } }
+        ]
+
+        messages = [{ role: :user, content: structured_content }]
+        body = provider.send(:build_request_body, messages, [], false)
+
+        expect(body[:messages][0][:content]).to eq(structured_content)
+        expect(body[:messages][0][:content]).to be_an(Array)
+      end
+    end
+
+    context "nil tool_call_id handling" do
+      it "uses 'unknown' for nil tool_call_id" do
+        messages = [
+          { role: :tool, content: "result", tool_call_id: nil, name: "func" }
+        ]
+
+        body = provider.send(:build_request_body, messages, [], false)
+        expect(body[:messages][0][:tool_call_id]).to eq("unknown")
+      end
+    end
+
+    context "assistant message without tool_calls" do
+      it "does not include tool_calls key" do
+        messages = [
+          { role: :assistant, content: "Just a plain response." }
+        ]
+
+        body = provider.send(:build_request_body, messages, [], false)
+        expect(body[:messages][0]).not_to have_key(:tool_calls)
       end
     end
   end
