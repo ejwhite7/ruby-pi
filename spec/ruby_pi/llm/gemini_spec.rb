@@ -26,6 +26,75 @@ RSpec.describe RubyPi::LLM::Gemini do
   end
 
   describe "#complete" do
+
+    context "request formatting" do
+      it "moves system messages to systemInstruction and excludes system from contents" do
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "application/json" },
+            body: JSON.generate({
+              candidates: [{
+                content: { parts: [{ text: "ok" }], role: "model" },
+                finishReason: "STOP"
+              }]
+            })
+          )
+
+        provider.complete(messages: [
+          { role: "system", content: "Follow these instructions." },
+          { role: "user", content: "Hello" }
+        ])
+
+        expect(
+          a_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+            .with { |req|
+              body = JSON.parse(req.body)
+              body["systemInstruction"] == { "parts" => [{ "text" => "Follow these instructions." }] } &&
+                body["contents"].none? { |content| content["role"] == "system" } &&
+                body["contents"] == [{ "role" => "user", "parts" => [{ "text" => "Hello" }] }]
+            }
+        ).to have_been_made
+      end
+
+      it "formats assistant tool calls and tool results for Gemini" do
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "application/json" },
+            body: JSON.generate({
+              candidates: [{
+                content: { parts: [{ text: "done" }], role: "model" },
+                finishReason: "STOP"
+              }]
+            })
+          )
+
+        provider.complete(messages: [
+          { role: "user", content: "Weather?" },
+          { role: "assistant", content: nil, tool_calls: [
+            { id: "gemini_0", name: "get_weather", arguments: { "location" => "Tokyo" } }
+          ] },
+          { role: "tool", name: "get_weather", tool_call_id: "gemini_0", content: '{"temperature":22}' }
+        ])
+
+        expect(
+          a_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+            .with { |req|
+              body = JSON.parse(req.body)
+              body["contents"][1] == {
+                "role" => "model",
+                "parts" => [{ "functionCall" => { "name" => "get_weather", "args" => { "location" => "Tokyo" } } }]
+              } &&
+                body["contents"][2] == {
+                  "role" => "user",
+                  "parts" => [{ "functionResponse" => { "name" => "get_weather", "response" => { "temperature" => 22 } } }]
+                }
+            }
+        ).to have_been_made
+      end
+    end
+
     context "successful text completion" do
       before do
         stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")

@@ -50,6 +50,7 @@ module RubyPi
       # @param system_prompt [String] the system-level instruction prompt
       # @param model [RubyPi::LLM::BaseProvider] the LLM provider instance
       # @param tools [RubyPi::Tools::Registry, nil] tool registry
+      # @param messages [Array<Hash>] initial conversation history
       # @param max_iterations [Integer] max think-act-observe cycles (default: 10)
       # @param transform_context [Proc, nil] context transform hook
       # @param before_tool_call [Proc, nil] pre-tool-execution hook
@@ -60,6 +61,7 @@ module RubyPi
         system_prompt:,
         model:,
         tools: nil,
+        messages: [],
         max_iterations: 10,
         transform_context: nil,
         before_tool_call: nil,
@@ -71,6 +73,7 @@ module RubyPi
           system_prompt: system_prompt,
           model: model,
           tools: tools,
+          messages: messages,
           max_iterations: max_iterations,
           transform_context: transform_context,
           before_tool_call: before_tool_call,

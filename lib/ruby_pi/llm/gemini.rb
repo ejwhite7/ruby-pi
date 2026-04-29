@@ -77,9 +77,23 @@ module RubyPi
       # @param tools [Array<Hash>] tool definitions
       # @return [Hash] the request body
       def build_request_body(messages, tools)
-        body = {
-          contents: messages.map { |msg| format_message(msg) }
-        }
+        system_parts = []
+        contents = []
+
+        messages.each do |msg|
+          role = message_role(msg)
+          if role == "system"
+            content = message_content(msg)
+            system_parts << { text: content.to_s } unless content.nil? || content.to_s.empty?
+            next
+          end
+
+          formatted = format_message(msg)
+          contents << formatted if formatted
+        end
+
+        body = { contents: contents }
+        body[:systemInstruction] = { parts: system_parts } unless system_parts.empty?
 
         unless tools.empty?
           body[:tools] = [{
@@ -93,18 +107,71 @@ module RubyPi
       # Converts a normalized message hash to Gemini's content format.
       #
       # @param message [Hash] a message with :role and :content keys
-      # @return [Hash] Gemini-formatted content object
+      # @return [Hash, nil] Gemini-formatted content object
       def format_message(message)
-        role = message[:role]&.to_s || message["role"]&.to_s || "user"
-        content = message[:content] || message["content"] || ""
+        role = message_role(message)
+        content = message_content(message)
 
-        # Gemini uses "user" and "model" roles
-        gemini_role = role == "assistant" ? "model" : role
+        case role
+        when "assistant"
+          parts = []
+          parts << { text: content.to_s } unless content.nil? || content.to_s.empty?
 
+          tool_calls = message[:tool_calls] || message["tool_calls"]
+          if tool_calls.is_a?(Array)
+            tool_calls.each do |tc|
+              name = tc[:name] || tc["name"]
+              arguments = tc[:arguments] || tc["arguments"] || tc[:input] || tc["input"] || {}
+              parts << { functionCall: { name: name, args: normalize_arguments(arguments) } } if name
+            end
+          end
+
+          return nil if parts.empty?
+
+          { role: "model", parts: parts }
+        when "tool"
+          name = message[:name] || message["name"] || message[:tool_name] || message["tool_name"]
+          response = content
+          response = JSON.parse(response) if response.is_a?(String) && response.strip.start_with?("{", "[")
+          response = { result: response } unless response.is_a?(Hash)
+
+          {
+            role: "user",
+            parts: [{
+              functionResponse: {
+                name: name.to_s,
+                response: response
+              }
+            }]
+          }
+        else
+          {
+            role: "user",
+            parts: [{ text: content.to_s }]
+          }
+        end
+      rescue JSON::ParserError
         {
-          role: gemini_role,
+          role: "user",
           parts: [{ text: content.to_s }]
         }
+      end
+
+      def message_role(message)
+        message[:role]&.to_s || message["role"]&.to_s || "user"
+      end
+
+      def message_content(message)
+        message[:content] || message["content"] || ""
+      end
+
+      def normalize_arguments(arguments)
+        return arguments if arguments.is_a?(Hash)
+        return JSON.parse(arguments) if arguments.is_a?(String) && !arguments.empty?
+
+        {}
+      rescue JSON::ParserError
+        { "_raw" => arguments.to_s }
       end
 
       # Converts a tool definition to Gemini's function declaration format.
