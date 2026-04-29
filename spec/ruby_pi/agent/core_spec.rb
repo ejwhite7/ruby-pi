@@ -56,6 +56,21 @@ RSpec.describe RubyPi::Agent::Core do
     it "sets max_iterations on state" do
       expect(agent.state.max_iterations).to eq(5)
     end
+
+    it "seeds initial messages into state" do
+      initial_messages = [
+        { role: :user, content: "Earlier question" },
+        { role: :assistant, content: "Earlier answer" }
+      ]
+
+      agent = described_class.new(
+        system_prompt: "test",
+        model: model,
+        messages: initial_messages
+      )
+
+      expect(agent.state.messages).to eq(initial_messages)
+    end
   end
 
   describe "#run" do
