@@ -78,12 +78,29 @@ module RubyPi
 
       # Builds the Anthropic API request body from messages and tools.
       #
+      # Handles three critical conversions from the internal message format to
+      # Anthropic's API format:
+      #
+      # 1. System messages (role: "system") are extracted and promoted to the
+      #    top-level `system:` parameter, since Anthropic does not allow system
+      #    messages in the messages array.
+      #
+      # 2. Tool result messages (role: "tool") are converted to role: "user"
+      #    messages with `tool_result` content blocks. Consecutive tool messages
+      #    are grouped into a single user message, as Anthropic requires.
+      #
+      # 3. Assistant messages that include `tool_calls` are converted to include
+      #    `tool_use` content blocks, so the API can match them to subsequent
+      #    `tool_result` blocks.
+      #
+      # Structured content (Arrays, Hashes) is preserved as-is and never
+      # coerced via `.to_s`, which would destroy the content block structure.
+      #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
       # @param stream [Boolean] whether streaming is enabled
       # @return [Hash] the request body
       def build_request_body(messages, tools, stream)
-        # Separate system message from conversation messages
         system_message = nil
         conversation = []
 
@@ -91,10 +108,41 @@ module RubyPi
           role = (msg[:role] || msg["role"]).to_s
           content = msg[:content] || msg["content"]
 
-          if role == "system"
+          case role
+          when "system"
+            # Anthropic requires system prompts as a top-level parameter, not
+            # as a message in the conversation array.
             system_message = content.to_s
+
+          when "tool"
+            # Internal tool-result messages must be converted to Anthropic's
+            # format: role "user" with a tool_result content block. The
+            # tool_use_id links this result back to the assistant's tool_use.
+            tool_result_block = build_tool_result_block(msg)
+
+            # Group consecutive tool results into a single "user" message.
+            # Anthropic requires this because alternating user/assistant roles
+            # means multiple tool results from one turn must share one user msg.
+            if conversation.last && conversation.last[:role] == "user" &&
+               conversation.last[:content].is_a?(Array) &&
+               conversation.last[:content].all? { |b| b[:type] == "tool_result" }
+              # Append to the existing grouped tool_result user message
+              conversation.last[:content] << tool_result_block
+            else
+              conversation << { role: "user", content: [tool_result_block] }
+            end
+
+          when "assistant"
+            # Build the assistant message with proper content blocks.
+            # If the message contains tool_calls, they must be included as
+            # tool_use content blocks so Anthropic can match them to the
+            # subsequent tool_result blocks.
+            conversation << build_assistant_message(msg, content)
+
           else
-            conversation << { role: role, content: content.to_s }
+            # Standard user (or other) messages — preserve structured content
+            # as-is and only convert simple values to strings.
+            conversation << { role: role, content: format_content(content) }
           end
         end
 
@@ -112,6 +160,118 @@ module RubyPi
         end
 
         body
+      end
+
+      # Builds an Anthropic tool_result content block from an internal tool
+      # message. Extracts the tool_call_id and content, handling edge cases
+      # like nil IDs or already-structured content.
+      #
+      # @param msg [Hash] internal tool message with :tool_call_id, :content, :name
+      # @return [Hash] Anthropic tool_result content block
+      def build_tool_result_block(msg)
+        tool_use_id = msg[:tool_call_id] || msg["tool_call_id"]
+        content = msg[:content] || msg["content"]
+
+        block = {
+          type: "tool_result",
+          tool_use_id: tool_use_id || "unknown"
+        }
+
+        # Content can be a simple string or a structured content array.
+        # Preserve structured content as-is; convert simple values to strings.
+        if content.is_a?(Array)
+          block[:content] = content
+        elsif content.is_a?(Hash)
+          block[:content] = [content]
+        elsif content.nil?
+          block[:content] = ""
+        else
+          block[:content] = content.to_s
+        end
+
+        block
+      end
+
+      # Builds an Anthropic-formatted assistant message, including tool_use
+      # content blocks when the message has tool_calls.
+      #
+      # Anthropic represents assistant responses as an array of content blocks.
+      # Text content becomes `{ type: "text", text: "..." }` blocks, and tool
+      # calls become `{ type: "tool_use", id: "...", name: "...", input: {...} }`
+      # blocks. Both can appear in the same message.
+      #
+      # @param msg [Hash] internal assistant message with optional :tool_calls
+      # @param content [String, Array, Hash, nil] the message content
+      # @return [Hash] Anthropic-formatted assistant message
+      def build_assistant_message(msg, content)
+        tool_calls = msg[:tool_calls] || msg["tool_calls"]
+        content_blocks = []
+
+        # Add text content block if present. Content may already be a structured
+        # array (from a previous Anthropic response) — preserve it as-is.
+        if content.is_a?(Array)
+          content_blocks.concat(content)
+        elsif content.is_a?(Hash)
+          content_blocks << content
+        elsif content && !content.to_s.empty?
+          content_blocks << { type: "text", text: content.to_s }
+        end
+
+        # Convert internal tool_calls into Anthropic tool_use content blocks.
+        # Each tool_call has :id, :name, and :arguments from ToolCall#to_h.
+        if tool_calls.is_a?(Array) && !tool_calls.empty?
+          tool_calls.each do |tc|
+            tc_id = tc[:id] || tc["id"]
+            tc_name = tc[:name] || tc["name"]
+            tc_args = tc[:arguments] || tc["arguments"] || {}
+
+            # Ensure arguments is a Hash; parse JSON string if needed
+            tc_input = if tc_args.is_a?(Hash)
+                         tc_args
+                       elsif tc_args.is_a?(String) && !tc_args.empty?
+                         begin
+                           JSON.parse(tc_args)
+                         rescue JSON::ParserError
+                           { "_raw" => tc_args }
+                         end
+                       else
+                         {}
+                       end
+
+            content_blocks << {
+              type: "tool_use",
+              id: tc_id || "unknown",
+              name: tc_name || "unknown",
+              input: tc_input
+            }
+          end
+        end
+
+        # If no content blocks were generated (edge case), add an empty text
+        # block to satisfy Anthropic's requirement for non-empty content.
+        content_blocks << { type: "text", text: "" } if content_blocks.empty?
+
+        { role: "assistant", content: content_blocks }
+      end
+
+      # Formats message content for the Anthropic API, preserving structured
+      # content (Arrays and Hashes) and only converting simple values to strings.
+      #
+      # Anthropic accepts both a plain string and an array of content blocks
+      # for the `content` field. Calling `.to_s` on structured content would
+      # destroy it, so this method passes Arrays and Hashes through unchanged.
+      #
+      # @param content [String, Array, Hash, nil] the raw content value
+      # @return [String, Array, Hash] formatted content suitable for Anthropic
+      def format_content(content)
+        case content
+        when Array, Hash
+          content
+        when nil
+          ""
+        else
+          content.to_s
+        end
       end
 
       # Converts a tool definition to Anthropic's tool format.
