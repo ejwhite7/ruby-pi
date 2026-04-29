@@ -7,5 +7,5 @@
 
 module RubyPi
   # The current version of the RubyPi gem, following Semantic Versioning.
-  VERSION = "0.1.2"
+  VERSION = "0.1.3"
 end
