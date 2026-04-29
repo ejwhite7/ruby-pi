@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-04-29
+
+### Fixed
+
+- Anthropic provider: tool result messages (`role: "tool"`) are now converted to `role: "user"` with `tool_result` content blocks containing the matching `tool_use_id`, and consecutive tool results from the same turn are grouped into a single user message as the Messages API requires
+- Anthropic provider: assistant messages with `tool_calls` are now preserved as `tool_use` content blocks (`{type: "tool_use", id:, name:, input:}`) instead of being silently discarded, so the API can match them to subsequent tool results
+- Anthropic and OpenAI providers: structured `content` (Arrays/Hashes, e.g. multimodal vision payloads) is preserved as-is instead of being collapsed by `to_s`
+- OpenAI provider: tool messages now include `tool_call_id` and assistant `tool_calls` are emitted in the full OpenAI function-call structure for proper result matching
+
+### Added
+
+- Comprehensive unit tests for `build_request_body` in both Anthropic and OpenAI providers covering full agent-loop conversations, consecutive tool result grouping, structured content preservation, and string- vs symbol-keyed message edge cases
+
 ## [0.1.1] - 2026-04-28
 
 ### Changed
