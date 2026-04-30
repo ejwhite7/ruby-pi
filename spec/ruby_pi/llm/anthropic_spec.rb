@@ -190,7 +190,120 @@ RSpec.describe RubyPi::LLM::Anthropic do
       end
     end
 
-    context "authentication error" do
+    context "missing tool_call_id validation" do
+      # Issue #6: Sending "unknown" as tool_use_id causes an opaque Anthropic
+      # API 400 error. The provider should fail fast with a descriptive error.
+
+      it "raises ProviderError when tool result message has nil tool_call_id" do
+        messages_with_nil_id = [
+          { role: "user", content: "Use the search tool" },
+          {
+            role: "assistant",
+            content: "I'll search for that.",
+            tool_calls: [{ id: "call_abc", name: "search", arguments: { q: "test" } }]
+          },
+          {
+            role: "tool",
+            tool_call_id: nil,
+            content: "Search results here"
+          }
+        ]
+
+        expect {
+          provider.complete(messages: messages_with_nil_id)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool_call_id/)
+      end
+
+      it "raises ProviderError when tool result message has no tool_call_id key" do
+        messages_without_id = [
+          { role: "user", content: "Use the search tool" },
+          {
+            role: "assistant",
+            content: "I'll search for that.",
+            tool_calls: [{ id: "call_abc", name: "search", arguments: { q: "test" } }]
+          },
+          {
+            role: "tool",
+            content: "Search results here"
+            # Note: no tool_call_id key at all
+          }
+        ]
+
+        expect {
+          provider.complete(messages: messages_without_id)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool_call_id/)
+      end
+
+      it "raises ProviderError when assistant tool_call has nil id" do
+        messages_with_nil_tc_id = [
+          { role: "user", content: "Help me" },
+          {
+            role: "assistant",
+            content: "Using a tool.",
+            tool_calls: [{ id: nil, name: "search", arguments: { q: "test" } }]
+          }
+        ]
+
+        expect {
+          provider.complete(messages: messages_with_nil_tc_id)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool call ID/)
+      end
+
+      it "includes :anthropic as the provider in the error" do
+        messages_with_nil_id = [
+          { role: "user", content: "Help" },
+          { role: "tool", tool_call_id: nil, content: "result" }
+        ]
+
+        expect {
+          provider.complete(messages: messages_with_nil_id)
+        }.to raise_error(RubyPi::ProviderError) { |error|
+          expect(error.provider).to eq(:anthropic)
+        }
+      end
+    end
+
+        context "real streaming via on_data callback" do
+      # Verifies that the streaming implementation uses Faraday's on_data
+      # callback to deliver chunks incrementally as they arrive from the API.
+      it "configures on_data for incremental SSE delivery" do
+        sse_body = <<~SSE
+          data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","usage":{"input_tokens":10,"output_tokens":0}}}
+
+          data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+          data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+          data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" World"}}
+
+          data: {"type":"content_block_stop","index":0}
+
+          data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}
+
+          data: {"type":"message_stop"}
+
+        SSE
+
+        stub_request(:post, "https://api.anthropic.com/v1/messages")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "text/event-stream" },
+            body: sse_body
+          )
+
+        event_types = []
+        response = provider.complete(messages: messages, stream: true) do |event|
+          event_types << event.type
+        end
+
+        # Verify incremental text deltas were yielded via the on_data callback
+        expect(event_types.count(:text_delta)).to eq(2)
+        expect(event_types.last).to eq(:done)
+        expect(response.content).to eq("Hello World")
+      end
+    end
+
+        context "authentication error" do
       it "raises AuthenticationError without retrying" do
         stub_request(:post, api_url)
           .to_return(status: 401, body: "Invalid API Key")
@@ -435,14 +548,24 @@ RSpec.describe RubyPi::LLM::Anthropic do
     end
 
     context "edge cases" do
-      it "handles nil tool_use_id gracefully" do
-        messages = [
+      it "raises ProviderError for nil tool_use_id instead of sending 'unknown'" do
+        # Previously this fell back to "unknown" which caused an opaque
+        # Anthropic API 400 error. Now it raises a descriptive ProviderError.
+        messages_with_nil_tool_use = [
           { role: :user, content: "test" },
           {
             role: :assistant,
             content: nil,
             tool_calls: [{ id: nil, name: "func", arguments: {} }]
-          },
+          }
+        ]
+
+        expect {
+          provider.send(:build_request_body, messages_with_nil_tool_use, [], false)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool call ID/)
+
+        messages_with_nil_result_id = [
+          { role: :user, content: "test" },
           {
             role: :tool,
             content: "result",
@@ -451,16 +574,9 @@ RSpec.describe RubyPi::LLM::Anthropic do
           }
         ]
 
-        body = provider.send(:build_request_body, messages, [], false)
-        conversation = body[:messages]
-
-        # tool_use block should use "unknown" for nil id
-        tool_use = conversation[1][:content].find { |b| b[:type] == "tool_use" }
-        expect(tool_use[:id]).to eq("unknown")
-
-        # tool_result block should use "unknown" for nil tool_use_id
-        tool_result = conversation[2][:content][0]
-        expect(tool_result[:tool_use_id]).to eq("unknown")
+        expect {
+          provider.send(:build_request_body, messages_with_nil_result_id, [], false)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool_call_id/)
       end
 
       it "handles string-keyed messages" do

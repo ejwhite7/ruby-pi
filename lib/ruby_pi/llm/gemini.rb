@@ -202,47 +202,75 @@ module RubyPi
         accumulated_tool_calls = []
         usage_data = {}
 
+        # Buffer for incomplete SSE lines across on_data chunks. Faraday's
+        # on_data callback delivers raw bytes as they arrive from the network,
+        # which may split SSE events mid-line. We accumulate a line buffer and
+        # process complete lines incrementally so that deltas reach the caller
+        # as soon as each SSE event is fully received.
+        sse_buffer = +""
+
         response = conn.post(url) do |req|
           req.headers["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
+
+          # Use Faraday's on_data callback for real incremental streaming.
+          # Without this, Faraday buffers the entire response body before
+          # returning — no deltas reach the caller until the model finishes
+          # generating (fake streaming).
+          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+            sse_buffer << chunk
+            # Process all complete lines in the buffer
+            while (line_end = sse_buffer.index("\n"))
+              line = sse_buffer.slice!(0, line_end + 1).strip
+              next if line.empty?
+              next unless line.start_with?("data: ")
+
+              data_str = line.sub(/\Adata: /, "")
+              next if data_str == "[DONE]"
+
+              begin
+                data = JSON.parse(data_str)
+              rescue JSON::ParserError
+                next
+              end
+
+              # Process this SSE event
+              candidates = data.dig("candidates") || []
+              candidate = candidates.first
+              next unless candidate
+
+              parts = candidate.dig("content", "parts") || []
+              parts.each do |part|
+                if part.key?("text")
+                  text_chunk = part["text"]
+                  accumulated_text << text_chunk
+                  block.call(StreamEvent.new(type: :text_delta, data: text_chunk))
+                elsif part.key?("functionCall")
+                  fc = part["functionCall"]
+                  tool_call = ToolCall.new(
+                    id: "gemini_#{accumulated_tool_calls.length}",
+                    name: fc["name"],
+                    arguments: fc["args"] || {}
+                  )
+                  accumulated_tool_calls << tool_call
+                  block.call(StreamEvent.new(type: :tool_call_delta, data: tool_call.to_h))
+                end
+              end
+
+              # Capture usage metadata if present
+              if data.key?("usageMetadata")
+                meta = data["usageMetadata"]
+                usage_data = {
+                  prompt_tokens: meta["promptTokenCount"],
+                  completion_tokens: meta["candidatesTokenCount"],
+                  total_tokens: meta["totalTokenCount"]
+                }
+              end
+            end
+          end
         end
 
         handle_error_response(response) unless response.success?
-
-        # Parse SSE events from the response body
-        parse_sse_events(response.body) do |data|
-          candidates = data.dig("candidates") || []
-          candidate = candidates.first
-          next unless candidate
-
-          parts = candidate.dig("content", "parts") || []
-          parts.each do |part|
-            if part.key?("text")
-              text_chunk = part["text"]
-              accumulated_text << text_chunk
-              block.call(StreamEvent.new(type: :text_delta, data: text_chunk))
-            elsif part.key?("functionCall")
-              fc = part["functionCall"]
-              tool_call = ToolCall.new(
-                id: "gemini_#{accumulated_tool_calls.length}",
-                name: fc["name"],
-                arguments: fc["args"] || {}
-              )
-              accumulated_tool_calls << tool_call
-              block.call(StreamEvent.new(type: :tool_call_delta, data: tool_call.to_h))
-            end
-          end
-
-          # Capture usage metadata if present
-          if data.key?("usageMetadata")
-            meta = data["usageMetadata"]
-            usage_data = {
-              prompt_tokens: meta["promptTokenCount"],
-              completion_tokens: meta["candidatesTokenCount"],
-              total_tokens: meta["totalTokenCount"]
-            }
-          end
-        end
 
         # Signal completion
         block.call(StreamEvent.new(type: :done))
