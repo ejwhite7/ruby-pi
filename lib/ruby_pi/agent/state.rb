@@ -134,6 +134,18 @@ module RubyPi
         @iteration += 1
       end
 
+      # Resets the iteration counter to zero.
+      #
+      # Issue #16: Provides an encapsulated way to reset the iteration counter
+      # instead of using instance_variable_set(:@iteration, 0) which bypasses
+      # encapsulation. Called at the start of both run() and continue() to
+      # ensure each invocation gets a fresh iteration budget.
+      #
+      # @return [Integer] the reset iteration count (0)
+      def reset_iteration!
+        @iteration = 0
+      end
+
       # Returns true if the iteration count has reached or exceeded max_iterations.
       #
       # @return [Boolean]

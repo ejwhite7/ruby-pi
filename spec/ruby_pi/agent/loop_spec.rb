@@ -196,7 +196,8 @@ RSpec.describe RubyPi::Agent::Loop do
       result = loop_runner.run
 
       expect(result.turns).to eq(2)
-      expect(result.success?).to be true
+      expect(result.success?).to be false
+      expect(result.stop_reason).to eq(:max_iterations)
     end
   end
 

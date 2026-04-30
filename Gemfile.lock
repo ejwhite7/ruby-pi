@@ -5,7 +5,6 @@ PATH
       concurrent-ruby (~> 1.2)
       faraday (~> 2.0)
       faraday-net_http (>= 3.0, < 3.4)
-      faraday-retry (~> 2.0)
       ostruct (~> 0.6)
 
 GEM
@@ -25,8 +24,6 @@ GEM
       logger
     faraday-net_http (3.3.0)
       net-http
-    faraday-retry (2.4.0)
-      faraday (~> 2.0)
     hashdiff (1.2.1)
     json (2.7.1)
     logger (1.7.0)

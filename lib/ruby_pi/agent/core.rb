@@ -88,9 +88,15 @@ module RubyPi
       # conversation history, executes the think-act-observe loop, emits
       # :agent_end when done, and returns the result.
       #
+      # Issue #16: Resets the iteration counter at the start of each run()
+      # call using the encapsulated reset_iteration! method. Previously,
+      # the counter was never reset on run(), so a second call to run()
+      # on the same agent instance could immediately trip max_iterations_reached?.
+      #
       # @param prompt [String] the user's initial message
       # @return [RubyPi::Agent::Result] the outcome of the agent run
       def run(prompt)
+        @state.reset_iteration!
         @state.add_message(role: :user, content: prompt)
         execute_loop
       end
@@ -99,11 +105,14 @@ module RubyPi
       # the existing conversation history and appends the new prompt before
       # resuming the loop.
       #
+      # Issue #16: Uses the encapsulated reset_iteration! method instead of
+      # the old approach that bypassed encapsulation
+      # and was fragile.
+      #
       # @param prompt [String] the follow-up user message
       # @return [RubyPi::Agent::Result] the outcome of the continued run
       def continue(prompt)
-        # Reset the iteration counter for the new run while keeping history
-        @state.instance_variable_set(:@iteration, 0)
+        @state.reset_iteration!
         @state.add_message(role: :user, content: prompt)
         execute_loop
       end

@@ -247,7 +247,7 @@ RSpec.describe "Agent Integration", :integration do
     result = agent.run("Do something")
 
     expect(result.turns).to eq(3)
-    expect(result).to be_success
+    expect(result).not_to be_success
   end
 
   # -----------------------------------------------------------------------

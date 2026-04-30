@@ -64,13 +64,36 @@ module RubyPi
       # Attempts to parse a JSON string into a Hash. Falls back to wrapping
       # the raw value in a hash if parsing fails.
       #
+      # Issue #15: Guards against non-string, non-hash inputs (e.g., Integer,
+      # nil, or any object that doesn't respond to `empty?`). Previously,
+      # calling `raw.empty?` on an Integer would raise NoMethodError.
+      # Now we check `raw.is_a?(String)` before calling string methods,
+      # and handle nil/non-string types gracefully.
+      #
       # @param raw [String, Object] raw arguments data
       # @return [Hash] parsed arguments
       def parse_arguments(raw)
-        return {} if raw.nil? || raw.empty?
+        # Handle nil explicitly
+        return {} if raw.nil?
 
-        JSON.parse(raw.to_s)
-      rescue JSON::ParserError
+        # If it's a String, attempt JSON parse (guard empty strings)
+        if raw.is_a?(String)
+          return {} if raw.strip.empty?
+
+          begin
+            parsed = JSON.parse(raw)
+            return parsed if parsed.is_a?(Hash)
+
+            # JSON.parse succeeded but didn't return a Hash (e.g., an array
+            # or scalar) — wrap it so callers always get a Hash.
+            return { "_raw" => parsed }
+          rescue JSON::ParserError
+            return { "_raw" => raw }
+          end
+        end
+
+        # For any other type (Integer, Float, Array, etc.) that isn't a Hash,
+        # wrap it in a hash to maintain the Hash return type contract.
         { "_raw" => raw.to_s }
       end
     end

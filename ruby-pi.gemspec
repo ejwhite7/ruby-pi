@@ -42,7 +42,10 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies
   spec.add_dependency "faraday",          "~> 2.0"
-  spec.add_dependency "faraday-retry",    "~> 2.0"
+  # Issue #20: Removed faraday-retry — retry logic is handled by BaseProvider#complete
+  # with exponential backoff. Having Faraday-level retry middleware would cause
+  # confusing double-retry behavior.
+  # spec.add_dependency "faraday-retry",    "~> 2.0"
   spec.add_dependency "faraday-net_http", ">= 3.0", "< 3.4"
   spec.add_dependency "concurrent-ruby",  "~> 1.2"
   spec.add_dependency "ostruct",          "~> 0.6"

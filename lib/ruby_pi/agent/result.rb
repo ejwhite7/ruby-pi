@@ -23,6 +23,12 @@ module RubyPi
     #   else
     #     puts "Error: #{result.error.message}"
     #   end
+    #
+    # @example Checking for truncation (Issue #19)
+    #   result = agent.run("Complex task")
+    #   if result.truncated?
+    #     puts "Warning: agent hit max iterations — result may be incomplete"
+    #   end
     class Result
       # @return [String, nil] the final text content from the assistant
       attr_reader :content
@@ -44,6 +50,16 @@ module RubyPi
       # @return [RubyPi::Error, StandardError, nil] the error if the run failed
       attr_reader :error
 
+      # @return [Symbol] the reason the agent stopped — :complete, :max_iterations,
+      #   or :error. Allows callers to distinguish between a clean finish and
+      #   being guillotined by the iteration limit.
+      #
+      # Issue #19: Added stop_reason to distinguish between a natural stop
+      # (LLM signaled completion) and hitting the max iteration limit. Previously,
+      # max_iterations produced a Result with no error, making success? return
+      # true even though the agent was forcibly stopped.
+      attr_reader :stop_reason
+
       # Creates a new Result instance.
       #
       # @param content [String, nil] the final assistant text
@@ -52,20 +68,38 @@ module RubyPi
       # @param usage [Hash] token usage statistics
       # @param turns [Integer] number of completed cycles
       # @param error [Exception, nil] error if the run failed
-      def initialize(content: nil, messages: [], tool_calls_made: [], usage: {}, turns: 0, error: nil)
+      # @param stop_reason [Symbol] why the agent stopped (:complete, :max_iterations, :error)
+      def initialize(content: nil, messages: [], tool_calls_made: [], usage: {}, turns: 0, error: nil, stop_reason: :complete)
         @content = content
         @messages = Array(messages).freeze
         @tool_calls_made = Array(tool_calls_made).freeze
         @usage = usage
         @turns = turns
         @error = error
+        @stop_reason = stop_reason
       end
 
-      # Returns true if the agent run completed without error.
+      # Returns true if the agent run completed without error AND was not
+      # truncated by the max iteration limit.
       #
-      # @return [Boolean] true unless an error is present
+      # Issue #19: Previously returned true when max_iterations was reached
+      # (because error was nil). Now returns false for truncated runs so
+      # callers can detect incomplete results.
+      #
+      # @return [Boolean] true only if the run completed naturally without error
       def success?
-        @error.nil?
+        @error.nil? && @stop_reason != :max_iterations
+      end
+
+      # Returns true if the agent was stopped by hitting the max iteration
+      # limit rather than completing naturally.
+      #
+      # Issue #19: Provides a convenient predicate for checking truncation
+      # without inspecting stop_reason directly.
+      #
+      # @return [Boolean] true if the run was truncated by max_iterations
+      def truncated?
+        @stop_reason == :max_iterations
       end
 
       # Returns a hash representation of the result for serialization.
@@ -79,7 +113,9 @@ module RubyPi
           usage: @usage,
           turns: @turns,
           error: @error&.message,
-          success: success?
+          success: success?,
+          stop_reason: @stop_reason,
+          truncated: truncated?
         }
       end
 
@@ -88,10 +124,11 @@ module RubyPi
       # @return [String]
       def to_s
         status = success? ? "success" : "error"
-        parts = ["status=#{status}", "turns=#{@turns}"]
+        parts = ["status=#{status}", "turns=#{@turns}", "stop_reason=#{@stop_reason}"]
         parts << "tools=#{@tool_calls_made.size}" unless @tool_calls_made.empty?
         parts << "content=#{@content&.slice(0, 80).inspect}" if @content
         parts << "error=#{@error.class}: #{@error.message}" if @error
+        parts << "truncated=true" if truncated?
         "#<RubyPi::Agent::Result #{parts.join(', ')}>"
       end
 

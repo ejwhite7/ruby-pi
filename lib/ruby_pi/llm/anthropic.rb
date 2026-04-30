@@ -225,10 +225,12 @@ module RubyPi
             tc_name = tc[:name] || tc["name"]
             tc_args = tc[:arguments] || tc["arguments"] || {}
 
-            # Ensure arguments is a Hash; parse JSON string if needed
+            # Ensure arguments is a Hash; parse JSON string if needed.
+            # Issue #12: Guard against empty strings — they are truthy but
+            # cause JSON::ParserError when parsed.
             tc_input = if tc_args.is_a?(Hash)
                          tc_args
-                       elsif tc_args.is_a?(String) && !tc_args.empty?
+                       elsif tc_args.is_a?(String) && !tc_args.strip.empty?
                          begin
                            JSON.parse(tc_args)
                          rescue JSON::ParserError
@@ -310,6 +312,11 @@ module RubyPi
 
       # Executes a streaming request to the Anthropic API, yielding events.
       #
+      # Issue #22: Wraps JSON.parse(current_tool_json) at content_block_stop
+      # in a rescue block. If the stream was truncated or the accumulated JSON
+      # is malformed, raises a typed ProviderError instead of letting
+      # JSON::ParserError propagate and abort the entire stream processing.
+      #
       # @param body [Hash] the request body
       # @yield [event] StreamEvent objects
       # @return [RubyPi::LLM::Response] final aggregated response
@@ -365,7 +372,25 @@ module RubyPi
 
           when "content_block_stop"
             if current_tool_call
-              arguments = current_tool_json.empty? ? {} : JSON.parse(current_tool_json)
+              # Issue #22: Guard JSON.parse against truncated/malformed JSON.
+              # If the stream was interrupted mid-tool-call, the accumulated
+              # JSON may be incomplete. Rescue JSON::ParserError and raise a
+              # typed ProviderError with context about what failed.
+              arguments = if current_tool_json.strip.empty?
+                            {}
+                          else
+                            begin
+                              JSON.parse(current_tool_json)
+                            rescue JSON::ParserError => e
+                              raise RubyPi::ProviderError.new(
+                                "Failed to parse streaming tool call arguments for " \
+                                "'#{current_tool_call[:name]}': #{e.message} " \
+                                "(accumulated JSON: #{current_tool_json.inspect})",
+                                provider: :anthropic
+                              )
+                            end
+                          end
+
               accumulated_tool_calls << ToolCall.new(
                 id: current_tool_call[:id],
                 name: current_tool_call[:name],
