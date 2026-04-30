@@ -45,6 +45,13 @@ module RubyPi
       # @return [RubyPi::Agent::State] the agent's mutable state
       attr_reader :state
 
+      # @return [Array<Class>] registered extension classes for introspection
+      attr_reader :extensions
+
+      # @return [RubyPi::Configuration, nil] per-agent configuration override
+      #   (nil means use global RubyPi.configuration)
+      attr_reader :config
+
       # Creates a new Agent instance.
       #
       # @param system_prompt [String] the system-level instruction prompt
@@ -57,6 +64,12 @@ module RubyPi
       # @param after_tool_call [Proc, nil] post-tool-execution hook
       # @param compaction [RubyPi::Context::Compaction, nil] compaction strategy
       # @param user_data [Hash] arbitrary data bag for transforms/extensions
+      # @param config [RubyPi::Configuration, nil] optional per-agent config
+      #   override. Falls back to global RubyPi.configuration if nil.
+      # @param execution_mode [Symbol] tool execution mode (:parallel or :sequential,
+      #   default: :parallel)
+      # @param tool_timeout [Numeric] per-tool execution timeout in seconds
+      #   (default: 30)
       def initialize(
         system_prompt:,
         model:,
@@ -67,7 +80,10 @@ module RubyPi
         before_tool_call: nil,
         after_tool_call: nil,
         compaction: nil,
-        user_data: {}
+        user_data: {},
+        config: nil,
+        execution_mode: :parallel,
+        tool_timeout: 30
       )
         @state = State.new(
           system_prompt: system_prompt,
@@ -82,6 +98,9 @@ module RubyPi
         )
         @compaction = compaction
         @extensions = []
+        @config = config
+        @execution_mode = execution_mode
+        @tool_timeout = tool_timeout
       end
 
       # Runs the agent with an initial user prompt. Adds the prompt to the
@@ -132,6 +151,15 @@ module RubyPi
         @extensions << extension_class
       end
 
+      # Returns the effective configuration for this agent. If a per-agent
+      # config was provided, returns that; otherwise falls back to the
+      # global RubyPi.configuration.
+      #
+      # @return [RubyPi::Configuration] the active configuration
+      def effective_config
+        @config || RubyPi.configuration
+      end
+
       private
 
       # Creates a Loop instance and executes it, emitting :agent_end when
@@ -142,7 +170,9 @@ module RubyPi
         loop_runner = Loop.new(
           state: @state,
           emitter: self,
-          compaction: @compaction
+          compaction: @compaction,
+          execution_mode: @execution_mode,
+          tool_timeout: @tool_timeout
         )
 
         result = loop_runner.run
