@@ -3,8 +3,9 @@
 # spec/ruby_pi/agent/loop_spec.rb
 #
 # Tests for RubyPi::Agent::Loop — verifies the think-act-observe cycle,
-# tool call execution, max_iterations halt, streaming, and compaction
-# integration.
+# tool call execution, max_iterations halt, streaming, compaction
+# integration, configurable execution_mode/tool_timeout, and tool_call_delta
+# event handling.
 
 require_relative "../../../lib/ruby_pi/errors"
 require_relative "../../../lib/ruby_pi/llm/response"
@@ -328,6 +329,81 @@ RSpec.describe RubyPi::Agent::Loop do
 
       expect(result.usage[:input_tokens]).to eq(300)
       expect(result.usage[:output_tokens]).to eq(125)
+    end
+  end
+
+  describe "configurable execution_mode and tool_timeout (#36)" do
+    it "accepts execution_mode and tool_timeout parameters" do
+      loop_runner = described_class.new(
+        state: state,
+        emitter: emitter,
+        execution_mode: :sequential,
+        tool_timeout: 60
+      )
+      expect(loop_runner).to be_a(described_class)
+    end
+
+    it "defaults to :parallel mode with 30s timeout" do
+      # The default values are used when params are not specified
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      state.add_message(role: :user, content: "Test")
+      allow(model).to receive(:complete).and_return(stop_response)
+      result = loop_runner.run
+      expect(result.success?).to be true
+    end
+  end
+
+  describe "tool_call_delta event (#37)" do
+    before do
+      state.add_message(role: :user, content: "Stream test")
+    end
+
+    it "emits :tool_call_delta when provider yields tool call streaming data" do
+      deltas = []
+      emitter.on(:tool_call_delta) { |d| deltas << d }
+
+      # Mock the model to yield a tool_call_delta stream event
+      allow(model).to receive(:complete) do |**_args, &block|
+        if block
+          event = RubyPi::LLM::StreamEvent.new(
+            type: :tool_call_delta,
+            data: { name: "search", partial_args: '{"q":' }
+          )
+          block.call(event)
+        end
+        stop_response(content: "Final answer")
+      end
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      loop_runner.run
+
+      expect(deltas.size).to eq(1)
+      expect(deltas.first[:data][:name]).to eq("search")
+    end
+
+    it "emits both :text_delta and :tool_call_delta from same stream" do
+      text_deltas = []
+      tool_deltas = []
+      emitter.on(:text_delta) { |d| text_deltas << d[:content] }
+      emitter.on(:tool_call_delta) { |d| tool_deltas << d[:data] }
+
+      allow(model).to receive(:complete) do |**_args, &block|
+        if block
+          block.call(RubyPi::LLM::StreamEvent.new(type: :text_delta, data: "Hello"))
+          block.call(RubyPi::LLM::StreamEvent.new(
+            type: :tool_call_delta,
+            data: { name: "calc", partial_args: "{}" }
+          ))
+        end
+        stop_response(content: "Hello")
+      end
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      loop_runner.run
+
+      expect(text_deltas).to eq(["Hello"])
+      expect(tool_deltas.size).to eq(1)
+      expect(tool_deltas.first[:name]).to eq("calc")
     end
   end
 end

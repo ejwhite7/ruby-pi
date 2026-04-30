@@ -37,10 +37,16 @@ module RubyPi
       # @param emitter [#emit] object that responds to `emit(event, data)`
       # @param compaction [RubyPi::Context::Compaction, nil] optional compaction
       #   strategy for managing context window size
-      def initialize(state:, emitter:, compaction: nil)
+      # @param execution_mode [Symbol] tool execution mode (:parallel or
+      #   :sequential, default: :parallel)
+      # @param tool_timeout [Numeric] per-tool execution timeout in seconds
+      #   (default: 30)
+      def initialize(state:, emitter:, compaction: nil, execution_mode: :parallel, tool_timeout: 30)
         @state = state
         @emitter = emitter
         @compaction = compaction
+        @execution_mode = execution_mode
+        @tool_timeout = tool_timeout
         @tool_calls_made = []
         @total_usage = { input_tokens: 0, output_tokens: 0 }
       end
@@ -96,7 +102,7 @@ module RubyPi
       private
 
       # THINK phase: applies transforms, calls the LLM, and streams text
-      # deltas back through the emitter.
+      # deltas and tool call deltas back through the emitter.
       #
       # @return [RubyPi::LLM::Response] the LLM response
       def think
@@ -123,6 +129,11 @@ module RubyPi
           if event.text_delta?
             streamed_content << event.data.to_s
             @emitter.emit(:text_delta, content: event.data)
+          elsif event.tool_call_delta?
+            # Emit tool call delta events so subscribers can observe partial
+            # tool call data as it streams in (e.g. for progress indicators
+            # or incremental JSON parsing).
+            @emitter.emit(:tool_call_delta, data: event.data)
           end
         end
 
@@ -137,15 +148,16 @@ module RubyPi
       end
 
       # ACT phase: executes each tool call from the LLM response, firing
-      # lifecycle hooks and events around each execution.
+      # lifecycle hooks and events around each execution. Uses the
+      # execution_mode and tool_timeout configured on the Loop.
       #
       # @param response [RubyPi::LLM::Response] the LLM response with tool calls
       # @return [void]
       def act(response)
         executor = RubyPi::Tools::Executor.new(
           @state.tools,
-          mode: :parallel,
-          timeout: 30
+          mode: @execution_mode,
+          timeout: @tool_timeout
         )
 
         # Prepare call hashes for the executor
