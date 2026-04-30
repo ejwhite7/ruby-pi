@@ -87,16 +87,24 @@ module RubyPi
         # Emit compaction event if an emitter is available
         @emitter&.emit(:compaction, dropped_count: droppable.size, summary: summary)
 
-        # Build the compacted history: summary as an assistant message + preserved.
-        # IMPORTANT: The summary must NOT use role: :system. If it did, the Anthropic
-        # provider's build_request_body would overwrite the actual system prompt with
-        # this summary (because it extracts the LAST system message as the top-level
-        # `system:` parameter). Using role: :assistant avoids this issue and also
-        # prevents consecutive user messages, which Anthropic's API rejects
-        # (it requires strict user/assistant alternation). An assistant summarizing
-        # prior conversation is also semantically correct.
+        # Build the compacted history: summary message + preserved.
+        #
+        # The summary role MUST NOT be :system (that would overwrite the real
+        # system prompt on Anthropic, which extracts the last :system message
+        # as the top-level `system:` parameter).
+        #
+        # The summary role must also NOT match the role of the first preserved
+        # message — consecutive same-role messages are rejected by Anthropic.
+        # We pick :user when the next preserved message is :assistant, and
+        # :assistant otherwise (covers :user, :tool, and an empty preserved).
+        # On Anthropic, :tool messages become role :user with tool_result
+        # blocks, so :assistant is the safe choice when the next message is
+        # :tool too.
+        first_preserved_role = preserved.first&.dig(:role)
+        summary_role = first_preserved_role == :assistant ? :user : :assistant
+
         summary_message = {
-          role: :assistant,
+          role: summary_role,
           content: "[Conversation Summary]\n#{summary}"
         }
 

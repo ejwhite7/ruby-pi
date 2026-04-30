@@ -71,6 +71,16 @@ module RubyPi
         @type == :done
       end
 
+      # Returns true if this is a fallback_start event, signaling that the
+      # primary provider failed mid-stream and the fallback provider is
+      # taking over. Consumers should clear any partial output rendered
+      # from the failed primary.
+      #
+      # @return [Boolean]
+      def fallback_start?
+        @type == :fallback_start
+      end
+
       # Returns a hash representation of the stream event.
       #
       # @return [Hash]

@@ -391,7 +391,13 @@ module RubyPi
           end
         end
 
-        handle_error_response(response) unless response.success?
+        # When on_data is active, the response body was consumed by the
+        # callback. Pass the accumulated error_body so ApiError carries the
+        # full server message instead of an empty body.
+        unless response.success?
+          error_body_str = error_body.empty? ? response.body : error_body
+          handle_error_response(response, override_body: error_body_str)
+        end
 
         # Build final tool calls from accumulators
         # Issue #12: Guard JSON.parse against empty strings. An empty string

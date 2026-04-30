@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Built gem artifacts (run `gem build` to produce these locally)
+*.gem
+
+# Bundler
+/.bundle/
+/vendor/bundle/
+
+# Coverage / runtime
+/coverage/
+/tmp/

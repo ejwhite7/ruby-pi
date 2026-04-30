@@ -145,6 +145,47 @@ RSpec.describe RubyPi::Context::Compaction do
         end
       end
 
+      it "uses :user summary role when first preserved message is :assistant" do
+        # When the preserved tail starts with :assistant, prepending an
+        # :assistant summary would create consecutive assistant messages
+        # (rejected by Anthropic). The summary role must therefore be :user.
+        # Construct a fixture where preserve_last_n=2 yields [assistant, user].
+        long = "x" * 200
+        msgs = [
+          { role: :user, content: long },
+          { role: :assistant, content: long },        # first preserved
+          { role: :user, content: long },
+          { role: :assistant, content: long },
+          { role: :assistant, content: "second-to-last" }, # preserved [0]
+          { role: :user, content: "last" }                  # preserved [1]
+        ]
+        result = compaction.compact(msgs, system_prompt)
+        expect(result.first[:role]).to eq(:user)
+        result.each_cons(2) do |a, b|
+          expect(a[:role]).not_to eq(b[:role])
+        end
+      end
+
+      it "uses :assistant summary role when first preserved message is :tool" do
+        # Tool-result messages also shouldn't be preceded by a same-role
+        # message. The summary should be :assistant in that case so the
+        # sequence is [assistant_summary, tool_result, ...].
+        long = "x" * 200
+        msgs = [
+          { role: :user, content: long },
+          { role: :assistant, content: long },
+          { role: :user, content: long },
+          { role: :assistant, content: long, tool_calls: [{ id: "t1", name: "x", arguments: {} }] },
+          { role: :tool, content: "tool result", tool_call_id: "t1", name: "x" }, # preserved [0]
+          { role: :assistant, content: "ack" }                                    # preserved [1]
+        ]
+        result = compaction.compact(msgs, system_prompt)
+        expect(result.first[:role]).to eq(:assistant)
+        result.each_cons(2) do |a, b|
+          expect(a[:role]).not_to eq(b[:role])
+        end
+      end
+
       it "has fewer messages than the original" do
         result = compaction.compact(messages, system_prompt)
         # 1 summary + 2 preserved = 3, vs original 4

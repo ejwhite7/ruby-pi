@@ -146,8 +146,16 @@ bundle exec rubocop
    - `provider_name` -- returns a Symbol (e.g., `:my_provider`)
    - `perform_complete(messages:, tools:, stream:, &block)` -- makes the HTTP call and returns a `Response`
 4. Use `build_connection(base_url:, headers:)` for Faraday setup
-5. Use `handle_error_response(response)` to raise typed errors
-6. Use `parse_sse_events(body) { |data| ... }` for streaming
+5. Use `handle_error_response(response)` to raise typed errors. When using
+   `req.options.on_data` for streaming, the response body is consumed by the
+   callback — accumulate error chunks separately when status >= 400 and pass
+   them via `handle_error_response(response, override_body: error_body)` so
+   `ApiError#response_body` carries the real server message (see Anthropic,
+   Gemini, and OpenAI providers for the pattern)
+6. Implement streaming via `req.options.on_data = proc { |chunk, _, env| ... }`.
+   Buffer incomplete SSE lines across chunks; yield `StreamEvent.new(type:
+   :text_delta, data: chunk)` and `StreamEvent.new(type: :tool_call_delta, data: ...)`
+   as complete events arrive
 7. Add the provider to the `case` statement in `RubyPi::LLM.model` (in `lib/ruby_pi.rb`)
 8. Add `require_relative` for the new file in `lib/ruby_pi.rb`
 9. Write specs in `spec/ruby_pi/llm/my_provider_spec.rb` following the existing pattern
@@ -181,14 +189,16 @@ The callable receives the `Agent::State` object and can mutate it (typically app
 
 1. Subclass `RubyPi::Extensions::Base`
 2. Use `on_event :event_name do |event| ... end` to subscribe to events
-3. Available events: `:turn_start`, `:turn_end`, `:text_delta`, `:tool_execution_start`, `:tool_execution_end`, `:agent_end`, `:error`, `:compaction`
+3. Available events: `:turn_start`, `:turn_end`, `:text_delta`, `:tool_call_delta`, `:tool_execution_start`, `:tool_execution_end`, `:agent_end`, `:error`, `:compaction`, `:provider_fallback`
    Note: `:before_tool_call` and `:after_tool_call` are constructor hooks (Procs on Agent::Core), not subscribable events.
 4. Register the extension: `agent.use(MyExtension)` (pass the CLASS, not an instance)
 
 ```ruby
 class MyExtension < RubyPi::Extensions::Base
   on_event :agent_end do |event|
-    puts "Agent finished after #{event[:iterations]} iterations"
+    # The :agent_end payload is { result:, success: }; the iteration count
+    # lives on the Result object as `turns`.
+    puts "Agent finished after #{event[:result].turns} turns"
   end
 end
 ```

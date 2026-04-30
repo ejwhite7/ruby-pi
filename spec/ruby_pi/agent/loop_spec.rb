@@ -407,4 +407,114 @@ RSpec.describe RubyPi::Agent::Loop do
       expect(tool_deltas.first[:name]).to eq("calc")
     end
   end
+
+  describe ":provider_fallback event translation" do
+    it "translates a :fallback_start StreamEvent into a :provider_fallback agent event" do
+      state.add_message(role: :user, content: "Hi")
+
+      received = []
+      emitter.on(:provider_fallback) { |e| received << e }
+
+      allow(model).to receive(:complete) do |**_args, &block|
+        # Simulate Fallback's behavior: emit a partial primary delta, then
+        # signal a fallback, then emit the fallback's deltas.
+        block.call(RubyPi::LLM::StreamEvent.new(type: :text_delta, data: "PARTIAL"))
+        block.call(RubyPi::LLM::StreamEvent.new(
+          type: :fallback_start,
+          data: { failed_provider: :primary, error: "boom", fallback_provider: :backup }
+        ))
+        block.call(RubyPi::LLM::StreamEvent.new(type: :text_delta, data: "Final answer"))
+        stop_response(content: "Final answer")
+      end
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      result = loop_runner.run
+
+      # The agent-level event fired with the StreamEvent's data merged in.
+      expect(received.size).to eq(1)
+      expect(received.first[:failed_provider]).to eq(:primary)
+      expect(received.first[:fallback_provider]).to eq(:backup)
+      expect(received.first[:error]).to eq("boom")
+
+      # The accumulated streamed_content was cleared on fallback so the
+      # discarded primary delta does not leak into the recorded response.
+      # The Response object's content (set by the provider) is what becomes
+      # the assistant message — verify it doesn't contain the partial.
+      assistant_msg = result.messages.find { |m| m[:role] == :assistant }
+      expect(assistant_msg[:content]).to eq("Final answer")
+      expect(assistant_msg[:content]).not_to include("PARTIAL")
+    end
+  end
+
+  describe "tool result JSON serialization" do
+    it "falls back to to_s when JSON.generate raises on non-serializable values" do
+      state.add_message(role: :user, content: "Run it")
+
+      # A tool that returns a Time, which JSON.generate cannot natively
+      # serialize without `require "json/add/time"` — exactly the kind of
+      # value a real Ruby tool might return.
+      now = Time.utc(2026, 4, 30, 12, 0, 0)
+      registry.register(
+        RubyPi::Tools::Definition.new(
+          name: :clock,
+          description: "Returns the current time",
+          parameters: { type: "object", properties: {} }
+        ) { |_| now }
+      )
+
+      # Make JSON.generate raise specifically for Time so the rescue path
+      # is exercised regardless of the host Ruby's stdlib behavior.
+      allow(JSON).to receive(:generate).and_wrap_original do |original, value|
+        raise JSON::GeneratorError, "Time not serializable" if value.is_a?(Time)
+
+        original.call(value)
+      end
+
+      allow(model).to receive(:complete).and_return(
+        tool_call_response([{ id: "c1", name: "clock", arguments: {} }]),
+        stop_response(content: "It is now")
+      )
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      result = loop_runner.run
+
+      expect(result.success?).to be true
+      tool_msg = result.messages.find { |m| m[:role] == :tool }
+      # Without the rescue, JSON::GeneratorError would have aborted the run.
+      # With it, the content falls back to the value's to_s.
+      expect(tool_msg[:content]).to eq(now.to_s)
+    end
+  end
+
+  describe "tool_calls_made arguments shape" do
+    it "records arguments with symbol keys, matching what the tool block received" do
+      state.add_message(role: :user, content: "Run")
+
+      received_args = nil
+      registry.register(
+        RubyPi::Tools::Definition.new(
+          name: :inspect_args,
+          description: "Captures its args",
+          parameters: { type: "object", properties: {} }
+        ) { |args| received_args = args; "ok" }
+      )
+
+      # Simulate string-keyed args coming back from a JSON-parsed LLM
+      # response — exactly what the providers produce in real use.
+      string_keyed = { "city" => "NYC", "options" => { "units" => "F" } }
+      allow(model).to receive(:complete).and_return(
+        tool_call_response([{ id: "c1", name: "inspect_args", arguments: string_keyed }]),
+        stop_response(content: "done")
+      )
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      result = loop_runner.run
+
+      # The tool block receives symbol keys (already verified by Executor
+      # tests) — assert the same shape is recorded in tool_calls_made.
+      recorded = result.tool_calls_made.first[:arguments]
+      expect(recorded).to eq(city: "NYC", options: { units: "F" })
+      expect(received_args).to eq(recorded)
+    end
+  end
 end

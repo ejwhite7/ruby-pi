@@ -48,8 +48,19 @@ module RubyPi
       # @return [Array<Class>] registered extension classes for introspection
       attr_reader :extensions
 
-      # @return [RubyPi::Configuration, nil] per-agent configuration override
-      #   (nil means use global RubyPi.configuration)
+      # @return [RubyPi::Configuration, nil] per-agent configuration handle
+      #   exposed for inspection only — see {#config=} caveats below. The
+      #   actual provider config is resolved at model construction time:
+      #
+      #     custom = RubyPi::Configuration.new
+      #     custom.openai_api_key = "sk-..."
+      #     model = RubyPi::LLM.model(:openai, "gpt-4o", config: custom)
+      #     agent = RubyPi::Agent.new(model: model, config: custom, ...)
+      #
+      #   Passing `config:` to `Agent.new` does NOT retroactively change the
+      #   model's behavior — it is informational, intended for inspection by
+      #   transforms and extensions. To override provider config you must
+      #   pass `config:` to the model factory as shown above.
       attr_reader :config
 
       # Creates a new Agent instance.
@@ -64,8 +75,13 @@ module RubyPi
       # @param after_tool_call [Proc, nil] post-tool-execution hook
       # @param compaction [RubyPi::Context::Compaction, nil] compaction strategy
       # @param user_data [Hash] arbitrary data bag for transforms/extensions
-      # @param config [RubyPi::Configuration, nil] optional per-agent config
-      #   override. Falls back to global RubyPi.configuration if nil.
+      # @param config [RubyPi::Configuration, nil] informational handle to
+      #   the per-agent configuration. Stored for inspection by transforms
+      #   and extensions but does NOT override the model's provider config —
+      #   the model is already constructed by the time it reaches the agent.
+      #   To use a per-agent config for actual API calls, pass it to the
+      #   model factory:
+      #     RubyPi::LLM.model(:openai, "gpt-4o", config: custom_config)
       # @param execution_mode [Symbol] tool execution mode (:parallel or :sequential,
       #   default: :parallel)
       # @param tool_timeout [Numeric] per-tool execution timeout in seconds

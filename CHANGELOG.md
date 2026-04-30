@@ -5,23 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-04-30
+
+### Fixed (adversarial review round 3)
+
+- **Streaming error body recovery — Gemini and OpenAI**: The 0.1.4 fix accumulated `error_body` in the `on_data` callback for all three providers but only Anthropic actually passed it to `handle_error_response`. Gemini (`gemini.rb`) and OpenAI (`openai.rb`) now also pass `override_body: error_body` so `ApiError#response_body` carries the real server error message on streaming HTTP failures, matching Anthropic's behavior
+- **Compaction consecutive same-role messages**: The 0.1.4 fix changed the summary role from `:user` to `:assistant` to avoid consecutive user messages, but produced consecutive assistants when the first preserved message was already `:assistant`. The summary role is now chosen based on the first preserved message's role: `:user` when the next message is `:assistant`, `:assistant` otherwise. New compaction spec exercises both orderings
+- **`:fallback_start` not surfaced to agent users**: `RubyPi::LLM::Fallback` emits a `:fallback_start` `StreamEvent` when the primary fails mid-stream, but the agent loop's stream block only handled `:text_delta` and `:tool_call_delta`, dropping the signal. The loop now translates `:fallback_start` into a new agent-level `:provider_fallback` event, and clears the streamed-content accumulator so the recorded response reflects only the fallback's output. Subscribers register with `agent.on(:provider_fallback) { |e| ... }`
+- **`StreamEvent#fallback_start?` predicate**: Added to match `text_delta?`, `tool_call_delta?`, and `done?` so consumers can branch on it without comparing `event.type` directly
+- **Tool result JSON serialization crash**: `Loop#act` called `JSON.generate(result.value)` unconditionally; tools returning Time, Date, or other non-JSON-serializable objects raised `JSON::GeneratorError` and aborted the agent run. The serialization is now wrapped in a rescue that falls back to `result.value.to_s`
+- **`tool_calls_made` argument shape inconsistency**: The arguments recorded in `Result#tool_calls_made` were the raw string-keyed `JSON.parse` output, while the tool block itself received the symbol-keyed copy `Tools::Executor` produces. Both now use the symbolized form, and `Tools::Executor.deep_symbolize_keys` is exposed as a public class method so the loop can apply the same transformation up front
+- **`Agent::Core` `config:` kwarg honesty**: The 0.1.4 changelog claimed the kwarg "flows through to provider construction." It does not — the model is constructed before the agent. The kwarg is informational only; users who want per-agent provider config must pass `config:` to the model factory: `RubyPi::LLM.model(:openai, "gpt-4o", config: cfg)`. The Agent::Core docstring and CHANGELOG now reflect this
+- **CHANGELOG references to nonexistent `BufferedStreamProxy`**: The 0.1.4 entry referenced a `BufferedStreamProxy` class that does not exist in the codebase; the buffering logic was inline in `Fallback`. Removed those references
+- **CLAUDE.md provider/extension guides**: "Adding a New LLM Provider" still referenced the deleted `parse_sse_events` helper; updated to describe the `on_data` streaming pattern. The `:agent_end` extension example used `event[:iterations]` (no such key) — replaced with `event[:result].turns`. Added `:tool_call_delta` and `:provider_fallback` to the available events list
+- **README streaming docs**: Documented the `:fallback_start` stream event and the agent-level `:provider_fallback` event with payload schema
+
 ## [0.1.4] - 2026-04-30
 
-### Fixed
-
-#### New Defects (from adversarial review round 2)
+### Fixed (adversarial review round 2)
 
 - **Anthropic ProviderError string interpolation**: Removed backslash-escaping on `#{}` interpolation in the ProviderError message for malformed tool call JSON, so actual tool name and parser error appear instead of literal `\#{...}` text
-- **Thread-unsafe streaming instance variables**: Replaced `@_stream_*` instance variables in Anthropic provider with method-local variables via a `process_anthropic_stream_event` helper, making streaming safe for concurrent requests
-- **Per-agent config threading**: The `config:` kwarg on `Agent::Core` now flows through to provider construction via `BaseProvider#initialize(config:)`. Providers use the passed-in config instead of reading `RubyPi.configuration` directly, enabling per-agent API keys, timeouts, and retry settings
-- **Streaming error body recovery**: All three providers now detect HTTP error status in the `on_data` callback and accumulate error response bodies separately. `handle_error_response` accepts an `override_body:` kwarg so `ApiError` contains the full error body even when streaming consumed it
-- **Compaction consecutive user messages**: Changed compaction summary from `role: :user` to `role: :assistant` to prevent consecutive user messages that Anthropic's API rejects (strict user/assistant alternation required)
+- **Thread-unsafe streaming instance variables**: Replaced `@_stream_*` instance variables in Anthropic provider with method-local variables via a `process_anthropic_stream_event` helper that returns updated state as a hash, making streaming safe for concurrent requests
+- **Streaming error body recovery (Anthropic)**: Anthropic's streaming path now detects HTTP error status in the `on_data` callback, accumulates the error response body separately, and passes it to `handle_error_response` via the new `override_body:` kwarg so `ApiError#response_body` carries the server's error message even though `on_data` consumed the response. (Note: 0.1.5 extends this to Gemini and OpenAI, which were missed in 0.1.4)
+- **Compaction `:system` poisoning**: Changed compaction summary role from `:system` to a non-system role to prevent overwriting the real system prompt on Anthropic. (Note: 0.1.5 refines the role choice to also avoid consecutive same-role messages)
 - **OpenAI missing tool_call_id**: OpenAI provider now raises `RubyPi::ProviderError` on nil/blank `tool_call_id` in tool result messages and assistant tool calls (same fail-fast pattern as Anthropic), instead of silently sending `"unknown"`
 - **Gemini streaming finish_reason**: Streaming responses now parse the actual `finishReason` from the Gemini candidate object instead of hardcoding `"stop"`
 - **README incorrect event keys**: Fixed `e[:iteration]` to `e[:turn]` and `event[:iterations]` to `event[:result].turns` throughout README examples
 - **Dead `parse_sse_events` method**: Removed unused `parse_sse_events` from `BaseProvider` (all providers now use real incremental streaming via `on_data`)
 - **`faraday-net_http` version cap**: Removed arbitrary `< 3.4` upper bound from both Gemfile and gemspec
-- **`BufferedStreamProxy` blocking happy path**: Streaming deltas now pass through immediately for non-fallback requests. `BufferedStreamProxy` only activates buffering when inside a `Fallback` context (primary attempt), flushing on success or discarding on failure before streaming fallback directly
+- **`Fallback` no longer buffers happy-path streams**: `Fallback#perform_complete_with_streaming_fallback` previously buffered all primary events and flushed them after completion, destroying the streaming UX even when nothing went wrong. Events now flow through to the consumer in real time. On primary failure, a `:fallback_start` `StreamEvent` is emitted before the fallback streams, signaling consumers to clear partial output
 
 #### Previously Addressed (adversarial review round 1, 35 items)
 
@@ -35,12 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `nil` tool guard in executor
 - Tool call ID validation (Anthropic fail-fast)
 - Streaming event types (`:text_delta` for text, `:tool_call_delta` for tools)
-- `BufferedStreamProxy` for fallback + streaming
 - Concurrent tool execution thread safety
 - `before_tool_call` / `after_tool_call` lifecycle hooks
 - `transform_context` pipeline support
 - Extension base class DSL (`on_event`, `before_tool`, `after_tool`)
-- Per-agent configuration support (`config:` kwarg)
+- `Agent::Core#config:` kwarg accepted (informational only — pass `config:` to the model factory to actually override provider config)
 - Typed error hierarchy with `response_body` on `ApiError`
 - `ostruct` runtime dependency declaration
 - Comprehensive test coverage (440+ examples)
