@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-04-30
+
+### Fixed
+
+#### New Defects (from adversarial review round 2)
+
+- **Anthropic ProviderError string interpolation**: Removed backslash-escaping on `#{}` interpolation in the ProviderError message for malformed tool call JSON, so actual tool name and parser error appear instead of literal `\#{...}` text
+- **Thread-unsafe streaming instance variables**: Replaced `@_stream_*` instance variables in Anthropic provider with method-local variables via a `process_anthropic_stream_event` helper, making streaming safe for concurrent requests
+- **Per-agent config threading**: The `config:` kwarg on `Agent::Core` now flows through to provider construction via `BaseProvider#initialize(config:)`. Providers use the passed-in config instead of reading `RubyPi.configuration` directly, enabling per-agent API keys, timeouts, and retry settings
+- **Streaming error body recovery**: All three providers now detect HTTP error status in the `on_data` callback and accumulate error response bodies separately. `handle_error_response` accepts an `override_body:` kwarg so `ApiError` contains the full error body even when streaming consumed it
+- **Compaction consecutive user messages**: Changed compaction summary from `role: :user` to `role: :assistant` to prevent consecutive user messages that Anthropic's API rejects (strict user/assistant alternation required)
+- **OpenAI missing tool_call_id**: OpenAI provider now raises `RubyPi::ProviderError` on nil/blank `tool_call_id` in tool result messages and assistant tool calls (same fail-fast pattern as Anthropic), instead of silently sending `"unknown"`
+- **Gemini streaming finish_reason**: Streaming responses now parse the actual `finishReason` from the Gemini candidate object instead of hardcoding `"stop"`
+- **README incorrect event keys**: Fixed `e[:iteration]` to `e[:turn]` and `event[:iterations]` to `event[:result].turns` throughout README examples
+- **Dead `parse_sse_events` method**: Removed unused `parse_sse_events` from `BaseProvider` (all providers now use real incremental streaming via `on_data`)
+- **`faraday-net_http` version cap**: Removed arbitrary `< 3.4` upper bound from both Gemfile and gemspec
+- **`BufferedStreamProxy` blocking happy path**: Streaming deltas now pass through immediately for non-fallback requests. `BufferedStreamProxy` only activates buffering when inside a `Fallback` context (primary attempt), flushing on success or discarding on failure before streaming fallback directly
+
+#### Previously Addressed (adversarial review round 1, 35 items)
+
+- API key exposure in Gemini URL query strings (moved to header)
+- Provider `format_tool` accepting `Definition` objects
+- Retry-after header parsing for `RateLimitError`
+- Max iterations boundary condition (off-by-one)
+- Token usage accumulation across turns
+- Agent result `success?` semantics for max-iteration stops
+- Context compaction system prompt poisoning
+- `nil` tool guard in executor
+- Tool call ID validation (Anthropic fail-fast)
+- Streaming event types (`:text_delta` for text, `:tool_call_delta` for tools)
+- `BufferedStreamProxy` for fallback + streaming
+- Concurrent tool execution thread safety
+- `before_tool_call` / `after_tool_call` lifecycle hooks
+- `transform_context` pipeline support
+- Extension base class DSL (`on_event`, `before_tool`, `after_tool`)
+- Per-agent configuration support (`config:` kwarg)
+- Typed error hierarchy with `response_body` on `ApiError`
+- `ostruct` runtime dependency declaration
+- Comprehensive test coverage (440+ examples)
+
 ## [0.1.3] - 2026-04-29
 
 ### Added

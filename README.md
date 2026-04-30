@@ -291,8 +291,8 @@ result2 = agent.continue("And in London?")
 Subscribe to lifecycle events for logging, monitoring, or custom behavior:
 
 ```ruby
-agent.on(:turn_start)          { |e| puts "Turn #{e[:iteration]} starting" }
-agent.on(:turn_end)            { |e| puts "Turn #{e[:iteration]} ended" }
+agent.on(:turn_start)          { |e| puts "Turn #{e[:turn]} starting" }
+agent.on(:turn_end)            { |e| puts "Turn #{e[:turn]} ended" }
 agent.on(:text_delta)          { |e| print e[:content] }
 agent.on(:tool_execution_start){ |e| puts "Calling #{e[:tool_name]}" }
 agent.on(:tool_execution_end)  { |e| puts "#{e[:tool_name]} => #{e[:result].value}" }
@@ -368,11 +368,11 @@ class MetricsExtension < RubyPi::Extensions::Base
 
   on_event :turn_end do |event|
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - @turn_timer
-    puts "Turn #{event[:iteration]} took #{elapsed.round(2)}s"
+    puts "Turn #{event[:turn]} took #{elapsed.round(2)}s"
   end
 
   on_event :agent_end do |event|
-    puts "Agent completed in #{event[:iterations]} iterations"
+    puts "Agent completed in #{event[:result].turns} turns"
   end
 end
 ```

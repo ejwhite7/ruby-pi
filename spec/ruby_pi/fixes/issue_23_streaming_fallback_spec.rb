@@ -2,19 +2,22 @@
 
 # spec/ruby_pi/fixes/issue_23_streaming_fallback_spec.rb
 #
-# Tests for Issue #23: Streaming + Fallback double-emits text deltas
-# When the primary provider streams partial data then fails, those deltas
-# should be discarded. The fallback should stream fresh from the start.
+# Tests for Issue #23 + Issue #12:
+# - Issue #23: When the primary provider fails mid-stream, the fallback
+#   streams fresh from the start. A :fallback_start event signals the
+#   consumer to clear partial output.
+# - Issue #12: Streaming events now pass through immediately on the happy
+#   path instead of being buffered until completion.
 
 require "spec_helper"
 
-RSpec.describe "Issue #23: Streaming + Fallback double-emit prevention" do
+RSpec.describe "Issue #23 + #12: Streaming + Fallback" do
   let(:primary) { double("primary", provider_name: :primary, model_name: "primary-model") }
   let(:fallback_provider) { double("fallback", provider_name: :fallback_inner, model_name: "fallback-model") }
   let(:provider) { RubyPi::LLM::Fallback.new(primary: primary, fallback: fallback_provider) }
 
-  describe "when primary succeeds" do
-    it "flushes all buffered events to the consumer" do
+  describe "when primary succeeds (happy path)" do
+    it "streams events directly to the consumer in real-time" do
       events_from_primary = [
         RubyPi::LLM::StreamEvent.new(type: :text_delta, data: "Hello"),
         RubyPi::LLM::StreamEvent.new(type: :text_delta, data: " world"),
@@ -25,8 +28,14 @@ RSpec.describe "Issue #23: Streaming + Fallback double-emit prevention" do
         content: "Hello world", tool_calls: [], usage: {}, finish_reason: "stop"
       )
 
+      # Verify events are delivered immediately (not buffered)
+      delivery_order = []
       allow(primary).to receive(:complete) do |**_args, &block|
-        events_from_primary.each { |e| block.call(e) }
+        events_from_primary.each do |e|
+          block.call(e)
+          delivery_order << :event_delivered
+        end
+        delivery_order << :complete_returned
         expected_response
       end
 
@@ -37,6 +46,9 @@ RSpec.describe "Issue #23: Streaming + Fallback double-emit prevention" do
         stream: true
       ) { |event| received_events << event }
 
+      # Events should have been delivered during the complete call,
+      # not buffered and flushed afterward.
+      expect(delivery_order).to eq([:event_delivered, :event_delivered, :event_delivered, :complete_returned])
       expect(received_events.map(&:type)).to eq([:text_delta, :text_delta, :done])
       expect(received_events[0].data).to eq("Hello")
       expect(received_events[1].data).to eq(" world")
@@ -45,7 +57,7 @@ RSpec.describe "Issue #23: Streaming + Fallback double-emit prevention" do
   end
 
   describe "when primary fails mid-stream" do
-    it "discards primary deltas and streams only fallback deltas" do
+    it "emits fallback_start event and streams fallback deltas" do
       # Primary emits 2 deltas then explodes
       allow(primary).to receive(:complete) do |**_args, &block|
         block.call(RubyPi::LLM::StreamEvent.new(type: :text_delta, data: "Partial"))
@@ -76,15 +88,24 @@ RSpec.describe "Issue #23: Streaming + Fallback double-emit prevention" do
         stream: true
       ) { |event| received_events << event }
 
-      # Should only see fallback events, NOT the partial primary events
-      text_deltas = received_events.select(&:text_delta?)
-      expect(text_deltas.map(&:data)).to eq(["Complete", " fallback response"])
-      expect(response.content).to eq("Complete fallback response")
+      # Consumer sees: primary deltas + fallback_start + fallback deltas
+      # The :fallback_start event signals the consumer to clear partial output.
+      event_types = received_events.map(&:type)
+      expect(event_types).to include(:fallback_start)
 
-      # Verify no "Partial" content leaked
-      all_text = text_deltas.map(&:data).join
-      expect(all_text).not_to include("Partial")
-      expect(all_text).not_to include("from primary")
+      # The fallback_start event carries metadata about what happened
+      fallback_event = received_events.find { |e| e.type == :fallback_start }
+      expect(fallback_event.data[:failed_provider]).to eq(:primary)
+      expect(fallback_event.data[:error]).to include("primary failed")
+      expect(fallback_event.data[:fallback_provider]).to eq(:fallback_inner)
+
+      # Fallback deltas should be present after fallback_start
+      fallback_start_idx = received_events.index(fallback_event)
+      post_fallback = received_events[(fallback_start_idx + 1)..]
+      text_deltas = post_fallback.select(&:text_delta?)
+      expect(text_deltas.map(&:data)).to eq(["Complete", " fallback response"])
+
+      expect(response.content).to eq("Complete fallback response")
     end
   end
 

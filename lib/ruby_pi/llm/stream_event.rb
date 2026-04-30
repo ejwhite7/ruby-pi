@@ -25,10 +25,10 @@ module RubyPi
     #   end
     class StreamEvent
       # Valid event types for stream events.
-      VALID_TYPES = %i[text_delta tool_call_delta done].freeze
+      VALID_TYPES = %i[text_delta tool_call_delta done fallback_start].freeze
 
       # @return [Symbol] the type of stream event — one of :text_delta,
-      #   :tool_call_delta, or :done
+      #   :tool_call_delta, :done, or :fallback_start
       attr_reader :type
 
       # @return [Object] the event payload. For :text_delta this is a String
@@ -38,7 +38,7 @@ module RubyPi
 
       # Creates a new StreamEvent instance.
       #
-      # @param type [Symbol] event type (:text_delta, :tool_call_delta, :done)
+      # @param type [Symbol] event type (:text_delta, :tool_call_delta, :done, :fallback_start)
       # @param data [Object] event payload
       # @raise [ArgumentError] if the type is not recognized
       def initialize(type:, data: nil)

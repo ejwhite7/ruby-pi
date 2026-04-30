@@ -30,7 +30,7 @@ module RubyPi
       # @param options [Hash] additional options passed to BaseProvider
       def initialize(model: nil, api_key: nil, **options)
         super(**options)
-        config = RubyPi.configuration
+        config = @config
         @model = model || config.default_openai_model
         @api_key = api_key || config.openai_api_key
       end
@@ -129,9 +129,22 @@ module RubyPi
           # OpenAI accepts role "tool" with a required tool_call_id field
           # to match this result back to the assistant's tool_call.
           tool_call_id = message[:tool_call_id] || message["tool_call_id"]
+
+          # Fail fast with a descriptive error instead of sending "unknown" as
+          # the tool_call_id. OpenAI requires tool_call_id to match a preceding
+          # tool_calls entry; sending "unknown" causes an opaque HTTP 400.
+          if tool_call_id.nil? || tool_call_id.to_s.strip.empty?
+            raise RubyPi::ProviderError.new(
+              "Missing tool_call_id in tool result message. OpenAI requires " \
+              "tool_call_id to match a preceding tool_calls entry. Ensure every " \
+              "tool result message includes a valid :tool_call_id.",
+              provider: :openai
+            )
+          end
+
           {
             role: "tool",
-            tool_call_id: tool_call_id || "unknown",
+            tool_call_id: tool_call_id,
             content: format_content(content)
           }
 
@@ -179,11 +192,21 @@ module RubyPi
                             "{}"
                           end
 
+            # Fail fast if tool call id is missing — OpenAI requires it for
+            # conversation continuity and tool result matching.
+            if tc_id.nil? || tc_id.to_s.strip.empty?
+              raise RubyPi::ProviderError.new(
+                "Missing id in assistant tool_call. OpenAI requires each " \
+                "tool_call to have a valid id for result matching.",
+                provider: :openai
+              )
+            end
+
             {
-              id: tc_id || "unknown",
+              id: tc_id,
               type: "function",
               function: {
-                name: tc_name || "unknown",
+                name: tc_name || "unknown_function",
                 arguments: args_string
               }
             }
@@ -274,6 +297,8 @@ module RubyPi
         # process complete lines incrementally so that deltas reach the caller
         # as soon as each SSE event is fully received.
         sse_buffer = +""
+        response_status = nil
+        error_body = +""
 
         response = conn.post("/v1/chat/completions") do |req|
           req.headers["Content-Type"] = "application/json"
@@ -283,7 +308,16 @@ module RubyPi
           # Without this, Faraday buffers the entire response body before
           # returning — no deltas reach the caller until the model finishes
           # generating (fake streaming).
-          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+          req.options.on_data = proc do |chunk, _overall_received_bytes, env|
+            response_status ||= env&.status
+
+            # If the HTTP status indicates an error, accumulate the body for
+            # the error handler instead of parsing it as SSE events.
+            if response_status && response_status >= 400
+              error_body << chunk
+              next
+            end
+
             sse_buffer << chunk
             # Process all complete lines in the buffer
             while (line_end = sse_buffer.index("\n"))

@@ -33,7 +33,7 @@ module RubyPi
       # @param options [Hash] additional options passed to BaseProvider
       def initialize(model: nil, api_key: nil, **options)
         super(**options)
-        config = RubyPi.configuration
+        config = @config
         @model = model || config.default_gemini_model
         @api_key = api_key || config.gemini_api_key
       end
@@ -222,6 +222,7 @@ module RubyPi
         accumulated_text = +""
         accumulated_tool_calls = []
         usage_data = {}
+        finish_reason = nil
 
         # Buffer for incomplete SSE lines across on_data chunks. Faraday's
         # on_data callback delivers raw bytes as they arrive from the network,
@@ -229,6 +230,8 @@ module RubyPi
         # process complete lines incrementally so that deltas reach the caller
         # as soon as each SSE event is fully received.
         sse_buffer = +""
+        response_status = nil
+        error_body = +""
 
         response = conn.post(url) do |req|
           req.headers["Content-Type"] = "application/json"
@@ -238,7 +241,16 @@ module RubyPi
           # Without this, Faraday buffers the entire response body before
           # returning — no deltas reach the caller until the model finishes
           # generating (fake streaming).
-          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+          req.options.on_data = proc do |chunk, _overall_received_bytes, env|
+            response_status ||= env&.status
+
+            # If the HTTP status indicates an error, accumulate the body for
+            # the error handler instead of parsing it as SSE events.
+            if response_status && response_status >= 400
+              error_body << chunk
+              next
+            end
+
             sse_buffer << chunk
             # Process all complete lines in the buffer
             while (line_end = sse_buffer.index("\n"))
@@ -278,6 +290,13 @@ module RubyPi
                 end
               end
 
+              # Parse the actual finish reason from the streaming response
+              # instead of hardcoding "stop". Gemini sends finishReason in
+              # the candidate object (e.g., "STOP", "MAX_TOKENS", "SAFETY").
+              if candidate["finishReason"]
+                finish_reason = candidate["finishReason"].downcase
+              end
+
               # Capture usage metadata if present
               if data.key?("usageMetadata")
                 meta = data["usageMetadata"]
@@ -300,7 +319,7 @@ module RubyPi
           content: accumulated_text.empty? ? nil : accumulated_text,
           tool_calls: accumulated_tool_calls,
           usage: usage_data,
-          finish_reason: "stop"
+          finish_reason: finish_reason || "stop"
         )
       end
 

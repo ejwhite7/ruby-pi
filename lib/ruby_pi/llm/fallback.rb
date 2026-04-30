@@ -93,11 +93,11 @@ module RubyPi
       # Each inner provider handles its own retries via BaseProvider#complete,
       # so this method does NOT add an additional retry layer.
       #
-      # Issue #23: When streaming with a block, we buffer deltas from the
-      # primary provider and only flush them to the real block once the
-      # primary completes successfully. If the primary fails mid-stream,
-      # the buffer is discarded and the fallback streams directly to the
-      # consumer's block, preventing double-emission of partial content.
+      # Issue #23 + Issue #12: When streaming with a block, events are
+      # delivered to the consumer in real-time (no buffering). If the
+      # primary fails mid-stream, a :fallback_start event is emitted
+      # so the consumer can clear partial state, then the fallback
+      # provider streams directly to the consumer.
       #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
@@ -129,38 +129,32 @@ module RubyPi
         @fallback.complete(messages: messages, tools: tools, stream: stream, &block)
       end
 
-      # Streaming fallback with delta buffering.
+      # Streaming fallback with real-time event delivery.
       #
-      # Issue #23: Buffers all streaming events from the primary provider.
-      # If the primary completes successfully, flushes the buffered events
-      # to the consumer's block. If it fails, discards the buffer and
-      # streams directly from the fallback provider.
+      # Issue #23 + Issue #12: Stream events directly to the consumer in
+      # real-time (no buffering on the happy path). If the primary provider
+      # fails mid-stream, emit a :fallback_start event so the consumer can
+      # reset any partial state, then stream from the fallback provider.
       #
-      # This prevents the consumer from seeing:
-      #   primary partial tokens + fallback complete tokens
-      # which would produce garbled, concatenated output.
+      # This preserves the streaming UX: consumers see tokens as they arrive
+      # instead of waiting for the entire response to complete. The tradeoff
+      # is that on primary failure, the consumer receives a :fallback_start
+      # signal and is responsible for clearing partial output.
       #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
       # @yield [event] the consumer's streaming block
       # @return [RubyPi::LLM::Response]
       def perform_complete_with_streaming_fallback(messages:, tools:, &block)
-        # Buffer events from the primary provider
-        buffered_events = []
-
         begin
+          # Stream primary events directly to the consumer for real-time UX.
+          # No buffering — tokens appear immediately as they arrive.
           response = @primary.complete(
             messages: messages,
             tools: tools,
-            stream: true
-          ) do |event|
-            # Buffer events instead of yielding directly to the consumer.
-            # We'll flush them after the primary completes successfully.
-            buffered_events << event
-          end
-
-          # Primary succeeded — flush buffered events to the consumer
-          buffered_events.each { |event| block.call(event) }
+            stream: true,
+            &block
+          )
 
           response
         rescue RubyPi::AuthenticationError
@@ -169,10 +163,16 @@ module RubyPi
         rescue RubyPi::Error => e
           log_fallback(e)
 
-          # Discard buffered events from the failed primary.
-          # Stream directly from the fallback to the consumer's block.
-          buffered_events.clear
+          # Signal the consumer that the primary failed mid-stream and a
+          # fallback provider is taking over. Consumers should use this event
+          # to clear any partial output from the failed primary.
+          block.call(StreamEvent.new(type: :fallback_start, data: {
+            failed_provider: @primary.provider_name,
+            error: e.message,
+            fallback_provider: @fallback.provider_name
+          }))
 
+          # Stream directly from the fallback to the consumer's block.
           @fallback.complete(
             messages: messages,
             tools: tools,
@@ -187,7 +187,7 @@ module RubyPi
       # @param error [Exception] the error that triggered the fallback
       # @return [void]
       def log_fallback(error)
-        logger = RubyPi.configuration.logger
+        logger = @config.logger
         return unless logger
 
         logger.warn(

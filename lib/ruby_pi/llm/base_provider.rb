@@ -41,14 +41,18 @@ module RubyPi
 
       # Initializes the base provider with retry configuration.
       #
-      # @param max_retries [Integer, nil] override max retries (defaults to global config)
-      # @param retry_base_delay [Float, nil] override base delay (defaults to global config)
-      # @param retry_max_delay [Float, nil] override max delay (defaults to global config)
-      def initialize(max_retries: nil, retry_base_delay: nil, retry_max_delay: nil)
-        config = RubyPi.configuration
-        @max_retries = max_retries || config.max_retries
-        @retry_base_delay = retry_base_delay || config.retry_base_delay
-        @retry_max_delay = retry_max_delay || config.retry_max_delay
+      # @param config [RubyPi::Configuration, nil] optional per-agent config override.
+      #   When provided, the provider uses this config instead of the global
+      #   RubyPi.configuration singleton. This enables per-agent API keys,
+      #   timeouts, and retry settings.
+      # @param max_retries [Integer, nil] override max retries (defaults to config)
+      # @param retry_base_delay [Float, nil] override base delay (defaults to config)
+      # @param retry_max_delay [Float, nil] override max delay (defaults to config)
+      def initialize(config: nil, max_retries: nil, retry_base_delay: nil, retry_max_delay: nil)
+        @config = config || RubyPi.configuration
+        @max_retries = max_retries || @config.max_retries
+        @retry_base_delay = retry_base_delay || @config.retry_base_delay
+        @retry_max_delay = retry_max_delay || @config.retry_max_delay
       end
 
       # Sends a completion request to the LLM provider with automatic retry
@@ -141,7 +145,7 @@ module RubyPi
       # @param error [Exception] the error that triggered the retry
       # @return [void]
       def log_retry(attempt, delay, error)
-        logger = RubyPi.configuration.logger
+        logger = @config.logger
         return unless logger
 
         logger.warn(
@@ -164,7 +168,7 @@ module RubyPi
       # @param headers [Hash] default headers for all requests
       # @return [Faraday::Connection]
       def build_connection(base_url:, headers: {})
-        config = RubyPi.configuration
+        config = @config
 
         Faraday.new(url: base_url) do |conn|
           conn.headers.update(headers)
@@ -175,59 +179,40 @@ module RubyPi
       end
 
       # Handles HTTP error responses by raising the appropriate RubyPi error.
+      # When streaming with on_data, the response body is consumed by the
+      # callback and response.body may be empty. Pass override_body with the
+      # accumulated error chunks so the raised error contains the full body.
       #
       # @param response [Faraday::Response] the HTTP response
+      # @param override_body [String, nil] optional body to use instead of response.body
+      #   (used when on_data consumed the body during streaming)
       # @raise [RubyPi::AuthenticationError] on 401 or 403
       # @raise [RubyPi::RateLimitError] on 429
       # @raise [RubyPi::ApiError] on other error status codes
-      def handle_error_response(response)
+      def handle_error_response(response, override_body: nil)
+        body = override_body || response.body
         case response.status
         when 401, 403
           raise RubyPi::AuthenticationError.new(
             "#{provider_name} authentication failed (HTTP #{response.status})",
-            response_body: response.body
+            response_body: body
           )
         when 429
           retry_after = response.headers["retry-after"]&.to_f
           raise RubyPi::RateLimitError.new(
             "#{provider_name} rate limit exceeded (HTTP 429)",
             retry_after: retry_after,
-            response_body: response.body
+            response_body: body
           )
         else
           raise RubyPi::ApiError.new(
             "#{provider_name} API error (HTTP #{response.status})",
             status_code: response.status,
-            response_body: response.body
+            response_body: body
           )
         end
       end
 
-      # Processes a streaming response body line by line, parsing SSE events.
-      # Yields parsed data hashes to the provided block.
-      #
-      # @param response_body [String] the raw SSE response body
-      # @yield [data] parsed SSE event data
-      # @yieldparam data [Hash] a parsed JSON event payload
-      # @return [void]
-      def parse_sse_events(response_body, &block)
-        response_body.each_line do |line|
-          line = line.strip
-          next if line.empty?
-          next unless line.start_with?("data: ")
-
-          data_str = line.sub(/\Adata: /, "")
-          next if data_str == "[DONE]"
-
-          begin
-            data = JSON.parse(data_str)
-            block.call(data)
-          rescue JSON::ParserError
-            # Skip malformed SSE data lines
-            next
-          end
-        end
-      end
     end
   end
 end

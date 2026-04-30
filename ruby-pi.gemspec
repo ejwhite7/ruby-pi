@@ -48,7 +48,8 @@ Gem::Specification.new do |spec|
   # with exponential backoff. Having Faraday-level retry middleware would cause
   # confusing double-retry behavior.
   # spec.add_dependency "faraday-retry",    "~> 2.0"
-  spec.add_dependency "faraday-net_http", ">= 3.0", "< 3.4"
+  # Issue #20: Removed arbitrary < 3.4 upper bound — no known incompatibility.
+  spec.add_dependency "faraday-net_http", "~> 3.0"
   spec.add_dependency "concurrent-ruby",  "~> 1.2"
 
   # Development dependencies

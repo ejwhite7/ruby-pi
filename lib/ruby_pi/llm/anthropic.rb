@@ -37,7 +37,7 @@ module RubyPi
       # @param options [Hash] additional options passed to BaseProvider
       def initialize(model: nil, api_key: nil, max_tokens: DEFAULT_MAX_TOKENS, **options)
         super(**options)
-        config = RubyPi.configuration
+        config = @config
         @model = model || config.default_anthropic_model
         @api_key = api_key || config.anthropic_api_key
         @max_tokens = max_tokens
@@ -371,6 +371,10 @@ module RubyPi
         sse_buffer = +""
         response_status = nil
 
+        # Accumulate error response body separately so ApiError gets the
+        # full body even though on_data consumed the chunks.
+        error_body = +""
+
         response = conn.post("/v1/messages") do |req|
           req.headers["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
@@ -381,6 +385,16 @@ module RubyPi
           # finishes generating (fake streaming).
           req.options.on_data = proc do |chunk, overall_received_bytes, env|
             response_status ||= env&.status
+
+            # If the HTTP status indicates an error, accumulate the body for
+            # the error handler instead of parsing it as SSE events. Faraday
+            # calls on_data for error responses too, which would otherwise
+            # consume the body and leave response.body empty.
+            if response_status && response_status >= 400
+              error_body << chunk
+              next
+            end
+
             sse_buffer << chunk
             # Process all complete lines in the buffer
             while (line_end = sse_buffer.index("\n"))
@@ -398,21 +412,29 @@ module RubyPi
               end
 
               # --- process each SSE event exactly as before ---
-              process_anthropic_stream_event(
+              # Process the SSE event and update mutable locals from the
+              # returned hash. This keeps all streaming state method-local,
+              # avoiding thread-unsafe instance variables.
+              stream_state = process_anthropic_stream_event(
                 data, accumulated_text, accumulated_tool_calls,
                 current_tool_call, current_tool_json, usage_data, finish_reason, block
-
               )
-              # Update mutable locals from the processing helper
-              current_tool_call = @_stream_current_tool_call
-              current_tool_json = @_stream_current_tool_json
-              finish_reason = @_stream_finish_reason
+              current_tool_call = stream_state[:current_tool_call]
+              current_tool_json = stream_state[:current_tool_json]
+              finish_reason = stream_state[:finish_reason]
             end
           end
         end
 
-        # Check for HTTP errors (on_data still fires for error responses)
-        handle_error_response(response) unless response.success?
+        # Check for HTTP errors. When on_data was active, the response body
+        # was consumed by the callback, so we pass the accumulated error_body
+        # to handle_error_response for proper error messaging.
+        unless response.success?
+          # Reconstruct the response body from what on_data accumulated
+          error_response = response
+          error_body_str = error_body.empty? ? response.body : error_body
+          handle_error_response(error_response, override_body: error_body_str)
+        end
 
         # Process any remaining data in the buffer after the connection closes
         sse_buffer.each_line do |line|
@@ -426,13 +448,13 @@ module RubyPi
           rescue JSON::ParserError
             next
           end
-          process_anthropic_stream_event(
+          stream_state = process_anthropic_stream_event(
             data, accumulated_text, accumulated_tool_calls,
             current_tool_call, current_tool_json, usage_data, finish_reason, block
           )
-          current_tool_call = @_stream_current_tool_call
-          current_tool_json = @_stream_current_tool_json
-          finish_reason = @_stream_finish_reason
+          current_tool_call = stream_state[:current_tool_call]
+          current_tool_json = stream_state[:current_tool_json]
+          finish_reason = stream_state[:finish_reason]
         end
 
         # (Event processing is now handled incrementally by the on_data callback
@@ -460,10 +482,10 @@ module RubyPi
       # on_data callback for each complete SSE event. Updates the mutable
       # accumulator variables and yields deltas to the caller's block.
       #
-      # Instance variables @_stream_current_tool_call, @_stream_current_tool_json,
-      # and @_stream_finish_reason are used to pass mutable state back to the
-      # caller since Ruby closures over local variables in Procs behave differently
-      # from method-local variables.
+      # Returns a hash with updated :current_tool_call, :current_tool_json,
+      # and :finish_reason values. The caller updates its own local variables
+      # from this hash, keeping all streaming state method-scoped and
+      # thread-safe.
       #
       # @param data [Hash] parsed SSE event payload
       # @param accumulated_text [String] mutable text accumulator
@@ -473,7 +495,7 @@ module RubyPi
       # @param usage_data [Hash] mutable usage data accumulator
       # @param finish_reason [String, nil] current finish reason
       # @param block [Proc] the caller's streaming block
-      # @return [void]
+      # @return [Hash] updated streaming state with :current_tool_call, :current_tool_json, :finish_reason
       def process_anthropic_stream_event(data, accumulated_text, accumulated_tool_calls,
                                           current_tool_call, current_tool_json,
                                           usage_data, finish_reason, block)
@@ -519,8 +541,8 @@ module RubyPi
                           rescue JSON::ParserError => e
                             raise RubyPi::ProviderError.new(
                               "Failed to parse streaming tool call arguments for " \
-                              "'\#{current_tool_call[:name]}': \#{e.message} " \
-                              "(accumulated JSON: \#{current_tool_json.inspect})",
+                              "'#{current_tool_call[:name]}': #{e.message} " \
+                              "(accumulated JSON: #{current_tool_json.inspect})",
                               provider: :anthropic
                             )
                           end
@@ -549,11 +571,12 @@ module RubyPi
           end
         end
 
-        # Store mutable state back via instance variables so the on_data Proc
-        # can read them after this method returns.
-        @_stream_current_tool_call = current_tool_call
-        @_stream_current_tool_json = current_tool_json
-        @_stream_finish_reason = finish_reason
+        # Return mutable state as a hash so the caller can update its locals.
+        # This avoids thread-unsafe instance variables that would leak state
+        # across concurrent requests on the same provider instance.
+        { current_tool_call: current_tool_call,
+          current_tool_json: current_tool_json,
+          finish_reason: finish_reason }
       end
 
       # Returns the default HTTP headers required by the Anthropic API.
