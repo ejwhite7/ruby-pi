@@ -31,16 +31,32 @@ module RubyPi
     #   loop = RubyPi::Agent::Loop.new(state: state, emitter: agent)
     #   result = loop.run
     class Loop
+      # Issue #18: Programming errors that should NOT be rescued by the loop.
+      # These indicate bugs in the calling code, not LLM/provider/tool failures.
+      # Rescuing them would silently swallow real bugs like typos or type mismatches.
+      PROGRAMMING_ERRORS = [
+        NoMethodError,
+        NameError,
+        ArgumentError,
+        TypeError
+      ].freeze
+
       # Creates a new Loop bound to the given state and event emitter.
       #
       # @param state [RubyPi::Agent::State] mutable agent state
       # @param emitter [#emit] object that responds to `emit(event, data)`
       # @param compaction [RubyPi::Context::Compaction, nil] optional compaction
       #   strategy for managing context window size
-      def initialize(state:, emitter:, compaction: nil)
+      # @param execution_mode [Symbol] tool execution mode (:parallel or
+      #   :sequential, default: :parallel)
+      # @param tool_timeout [Numeric] per-tool execution timeout in seconds
+      #   (default: 30)
+      def initialize(state:, emitter:, compaction: nil, execution_mode: :parallel, tool_timeout: 30)
         @state = state
         @emitter = emitter
         @compaction = compaction
+        @execution_mode = execution_mode
+        @tool_timeout = tool_timeout
         @tool_calls_made = []
         @total_usage = { input_tokens: 0, output_tokens: 0 }
       end
@@ -49,12 +65,24 @@ module RubyPi
       # Returns an Agent::Result capturing the final content, messages, tool
       # calls, usage, and turn count.
       #
+      # Issue #18: Re-raises programming errors (NoMethodError, NameError,
+      # ArgumentError, TypeError) instead of swallowing them. Only LLM/provider/
+      # tool errors are caught and wrapped in a failed Result.
+      #
+      # Issue #19: When max_iterations is reached, the Result now includes
+      # stop_reason: :max_iterations and success? returns false. Previously,
+      # the Result had no error set, so success? returned true even though
+      # the agent was forcibly stopped.
+      #
       # @return [RubyPi::Agent::Result] the outcome of the agent run
       def run
         loop do
           # Check iteration limit before starting a new turn
           if @state.max_iterations_reached?
-            return build_result(content: last_assistant_content)
+            return build_result(
+              content: last_assistant_content,
+              stop_reason: :max_iterations
+            )
           end
 
           # Apply context compaction if configured and needed
@@ -78,9 +106,14 @@ module RubyPi
           else
             # No tool calls — the LLM is done
             @emitter.emit(:turn_end, turn: @state.iteration, has_tool_calls: false)
-            return build_result(content: response.content)
+            return build_result(content: response.content, stop_reason: :complete)
           end
         end
+      rescue *PROGRAMMING_ERRORS
+        # Issue #18: Re-raise programming errors immediately. These are bugs
+        # in the calling code (typos, wrong argument counts, type mismatches)
+        # that should never be silently swallowed.
+        raise
       rescue StandardError => e
         @emitter.emit(:error, error: e, source: :agent_loop)
         Result.new(
@@ -89,14 +122,15 @@ module RubyPi
           tool_calls_made: @tool_calls_made,
           usage: @total_usage,
           turns: @state.iteration,
-          error: e
+          error: e,
+          stop_reason: :error
         )
       end
 
       private
 
       # THINK phase: applies transforms, calls the LLM, and streams text
-      # deltas back through the emitter.
+      # deltas and tool call deltas back through the emitter.
       #
       # @return [RubyPi::LLM::Response] the LLM response
       def think
@@ -123,6 +157,11 @@ module RubyPi
           if event.text_delta?
             streamed_content << event.data.to_s
             @emitter.emit(:text_delta, content: event.data)
+          elsif event.tool_call_delta?
+            # Emit tool call delta events so subscribers can observe partial
+            # tool call data as it streams in (e.g. for progress indicators
+            # or incremental JSON parsing).
+            @emitter.emit(:tool_call_delta, data: event.data)
           end
         end
 
@@ -137,15 +176,27 @@ module RubyPi
       end
 
       # ACT phase: executes each tool call from the LLM response, firing
-      # lifecycle hooks and events around each execution.
+      # lifecycle hooks and events around each execution. Uses the
+      # execution_mode and tool_timeout configured on the Loop.
+      #
+      # Issue #17: Checks for nil/empty tools before creating the Executor.
+      # If the LLM hallucinates tool calls but no tools are registered,
+      # raises NoToolsRegisteredError instead of crashing with NoMethodError.
       #
       # @param response [RubyPi::LLM::Response] the LLM response with tool calls
       # @return [void]
       def act(response)
+        # Issue #17: Guard against nil tools — if the model returned tool calls
+        # but no tools are registered, raise a clear typed error.
+        if @state.tools.nil?
+          raise RubyPi::NoToolsRegisteredError,
+                "Model returned #{response.tool_calls.size} tool call(s) but no tools are registered"
+        end
+
         executor = RubyPi::Tools::Executor.new(
           @state.tools,
-          mode: :parallel,
-          timeout: 30
+          mode: @execution_mode,
+          timeout: @tool_timeout
         )
 
         # Prepare call hashes for the executor
@@ -250,14 +301,16 @@ module RubyPi
       # Constructs the final Agent::Result from the current state.
       #
       # @param content [String, nil] the final text content
+      # @param stop_reason [Symbol] why the agent stopped (:complete, :max_iterations, :error)
       # @return [RubyPi::Agent::Result]
-      def build_result(content:)
+      def build_result(content:, stop_reason: :complete)
         Result.new(
           content: content,
           messages: @state.messages,
           tool_calls_made: @tool_calls_made,
           usage: @total_usage,
-          turns: @state.iteration
+          turns: @state.iteration,
+          stop_reason: stop_reason
         )
       end
     end

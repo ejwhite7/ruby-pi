@@ -172,13 +172,31 @@ module RubyPi
         declaration
       end
 
+      # Returns the default HTTP headers for Gemini API requests.
+      #
+      # Issue #13: The API key is now sent via the `x-goog-api-key` header
+      # instead of being interpolated into the URL query string. This prevents
+      # the key from leaking into debug logs, backtraces, and HTTP intermediary
+      # logs (proxies, load balancers, etc.).
+      #
+      # @return [Hash] headers hash
+      def default_headers
+        {
+          "x-goog-api-key" => @api_key.to_s
+        }
+      end
+
       # Executes a standard (non-streaming) request to the Gemini API.
+      #
+      # Issue #13: Removed API key from the URL query string. The key is now
+      # sent via the `x-goog-api-key` header (set in default_headers) to
+      # avoid leaking credentials into logs and backtraces.
       #
       # @param body [Hash] the request body
       # @return [RubyPi::LLM::Response]
       def perform_standard_request(body)
-        conn = build_connection(base_url: BASE_URL)
-        url = "/#{API_VERSION}/models/#{@model}:generateContent?key=#{@api_key}"
+        conn = build_connection(base_url: BASE_URL, headers: default_headers)
+        url = "/#{API_VERSION}/models/#{@model}:generateContent"
 
         response = conn.post(url) do |req|
           req.headers["Content-Type"] = "application/json"
@@ -191,12 +209,15 @@ module RubyPi
 
       # Executes a streaming request to the Gemini API, yielding events.
       #
+      # Issue #13: Removed API key from the URL query string. The key is now
+      # sent via the `x-goog-api-key` header (set in default_headers).
+      #
       # @param body [Hash] the request body
       # @yield [event] StreamEvent objects
       # @return [RubyPi::LLM::Response] final aggregated response
       def perform_streaming_request(body, &block)
-        conn = build_connection(base_url: BASE_URL)
-        url = "/#{API_VERSION}/models/#{@model}:streamGenerateContent?key=#{@api_key}&alt=sse"
+        conn = build_connection(base_url: BASE_URL, headers: default_headers)
+        url = "/#{API_VERSION}/models/#{@model}:streamGenerateContent?alt=sse"
 
         accumulated_text = +""
         accumulated_tool_calls = []

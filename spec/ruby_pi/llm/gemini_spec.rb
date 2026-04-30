@@ -28,7 +28,7 @@ RSpec.describe RubyPi::LLM::Gemini do
   describe "#complete" do
     context "successful text completion" do
       before do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "application/json" },
@@ -69,7 +69,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
     context "tool call response" do
       before do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "application/json" },
@@ -120,7 +120,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
         SSE
 
-        stub_request(:post, "#{base_url}:streamGenerateContent?key=test-gemini-key&alt=sse")
+        stub_request(:post, "#{base_url}:streamGenerateContent?alt=sse")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "text/event-stream" },
@@ -182,7 +182,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       it "retries on 500 errors and succeeds" do
         call_count = 0
 
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             { status: 500, body: "Internal Server Error" },
             { status: 200, headers: { "Content-Type" => "application/json" },
@@ -201,7 +201,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       end
 
       it "raises after exhausting retries" do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(status: 500, body: "Server Error")
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
@@ -245,7 +245,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
     context "authentication error" do
       it "raises AuthenticationError without retrying" do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(status: 401, body: "Unauthorized")
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::AuthenticationError)
@@ -254,7 +254,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
     context "rate limit error" do
       it "retries on 429 and eventually raises" do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(status: 429, body: "Rate limited", headers: { "Retry-After" => "1" })
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::RateLimitError)
@@ -271,7 +271,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       end
 
       before do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "application/json" },
@@ -288,7 +288,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       it "sends system messages as systemInstruction, not in contents" do
         provider.complete(messages: system_messages)
 
-        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent")
           .with { |req|
             body = JSON.parse(req.body)
             # systemInstruction should be present
@@ -303,7 +303,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       it "omits systemInstruction when no system messages are present" do
         provider.complete(messages: [{ role: "user", content: "Hello!" }])
 
-        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent")
           .with { |req|
             body = JSON.parse(req.body)
             !body.key?("systemInstruction")
@@ -321,7 +321,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       end
 
       before do
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "application/json" },
@@ -338,7 +338,7 @@ RSpec.describe RubyPi::LLM::Gemini do
       it "formats tool messages as functionResponse with user role" do
         provider.complete(messages: tool_messages)
 
-        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent")
           .with { |req|
             body = JSON.parse(req.body)
             tool_msg = body["contents"].find { |c|

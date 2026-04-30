@@ -9,7 +9,7 @@
 require "spec_helper"
 
 RSpec.describe RubyPi::LLM::Fallback do
-  let(:gemini_url) { "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=test-gemini-key" }
+  let(:gemini_url) { "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent" }
   let(:openai_url) { "https://api.openai.com/v1/chat/completions" }
 
   let(:primary) { RubyPi::LLM::Gemini.new(model: "gemini-2.0-flash", api_key: "test-gemini-key") }

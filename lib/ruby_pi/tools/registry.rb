@@ -6,7 +6,8 @@
 #
 # The Registry holds a collection of tool definitions and provides methods
 # for looking them up by name, filtering by category, and extracting subsets.
-# It uses a Mutex for thread safety when registering tools concurrently.
+# All public methods are protected by a Mutex for thread safety, ensuring
+# safe concurrent access from agent loops and parallel tool execution.
 #
 # Usage:
 #   registry = RubyPi::Tools::Registry.new
@@ -27,8 +28,9 @@ module RubyPi
 
       # Registers a tool definition in the registry.
       #
-      # If a tool with the same name already exists, it will be overwritten
-      # and a warning is emitted to stderr.
+      # If a tool with the same name already exists, it will be overwritten.
+      # A debug-level log message is emitted if a logger is configured;
+      # otherwise the overwrite is silent (no warn to stderr).
       #
       # @param tool [RubyPi::Tools::Definition] The tool to register.
       # @return [RubyPi::Tools::Definition] The registered tool.
@@ -40,7 +42,12 @@ module RubyPi
 
         @mutex.synchronize do
           if @tools.key?(tool.name)
-            warn "RubyPi::Tools::Registry: overwriting existing tool '#{tool.name}'"
+            # Use the configured logger at debug level instead of unconditional
+            # warn to stderr, which is noisy in production environments.
+            logger = RubyPi.configuration.logger
+            if logger
+              logger.debug("RubyPi::Tools::Registry: overwriting existing tool '#{tool.name}'")
+            end
           end
           @tools[tool.name] = tool
         end
@@ -48,17 +55,18 @@ module RubyPi
         tool
       end
 
-      # Finds a tool by name.
+      # Finds a tool by name. Thread-safe.
       #
       # @param name [String, Symbol] The name of the tool to look up.
       # @return [RubyPi::Tools::Definition, nil] The tool, or nil if not found.
       def find(name)
-        @tools[name.to_sym]
+        @mutex.synchronize { @tools[name.to_sym] }
       end
 
       # Returns a new Registry containing only the tools with the given names.
       #
       # Tools that are not found in this registry are silently skipped.
+      # Thread-safe.
       #
       # @param names [Array<String, Symbol>] The tool names to include.
       # @return [RubyPi::Tools::Registry] A new registry with the matching tools.
@@ -71,42 +79,44 @@ module RubyPi
         sub
       end
 
-      # Returns all tools that belong to the given category.
+      # Returns all tools that belong to the given category. Thread-safe.
       #
       # @param category [Symbol, String] The category to filter by.
       # @return [Array<RubyPi::Tools::Definition>] Tools matching the category.
       def by_category(category)
         cat = category.to_sym
-        @tools.values.select { |tool| tool.category == cat }
+        @mutex.synchronize do
+          @tools.values.select { |tool| tool.category == cat }
+        end
       end
 
-      # Returns all registered tool definitions.
+      # Returns all registered tool definitions. Thread-safe.
       #
       # @return [Array<RubyPi::Tools::Definition>] All tools in registration order.
       def all
-        @tools.values
+        @mutex.synchronize { @tools.values }
       end
 
-      # Returns the names of all registered tools.
+      # Returns the names of all registered tools. Thread-safe.
       #
       # @return [Array<Symbol>] An array of tool name symbols.
       def names
-        @tools.keys
+        @mutex.synchronize { @tools.keys }
       end
 
-      # Returns the number of registered tools.
+      # Returns the number of registered tools. Thread-safe.
       #
       # @return [Integer] The count of tools.
       def size
-        @tools.size
+        @mutex.synchronize { @tools.size }
       end
 
-      # Checks whether a tool with the given name is registered.
+      # Checks whether a tool with the given name is registered. Thread-safe.
       #
       # @param name [String, Symbol] The tool name to check.
       # @return [Boolean] true if the tool exists in the registry.
       def registered?(name)
-        @tools.key?(name.to_sym)
+        @mutex.synchronize { @tools.key?(name.to_sym) }
       end
 
       # Provides a human-readable string representation.

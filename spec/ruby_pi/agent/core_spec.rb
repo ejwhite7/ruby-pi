@@ -3,7 +3,8 @@
 # spec/ruby_pi/agent/core_spec.rb
 #
 # Tests for RubyPi::Agent::Core — verifies agent.run with mocked LLM,
-# multi-turn continue, event emission, hooks firing, and extension registration.
+# multi-turn continue, event emission, hooks firing, extension registration
+# with introspection, per-agent configuration, and execution options.
 
 require_relative "../../../lib/ruby_pi/errors"
 require_relative "../../../lib/ruby_pi/llm/response"
@@ -70,6 +71,14 @@ RSpec.describe RubyPi::Agent::Core do
       )
 
       expect(agent.state.messages).to eq(initial_messages)
+    end
+
+    it "initializes extensions as empty array" do
+      expect(agent.extensions).to eq([])
+    end
+
+    it "defaults config to nil (uses global)" do
+      expect(agent.config).to be_nil
     end
   end
 
@@ -194,8 +203,6 @@ RSpec.describe RubyPi::Agent::Core do
 
   describe "#use (extensions)" do
     it "registers an extension and subscribes its hooks" do
-      extension_data = nil
-
       ext_class = Class.new(RubyPi::Extensions::Base) do
         on_event :agent_end do |data, _agent|
           # This will be captured via the test
@@ -213,25 +220,78 @@ RSpec.describe RubyPi::Agent::Core do
     end
 
     it "extension hooks fire on events" do
-      fired = false
-
-      ext_class = Class.new(RubyPi::Extensions::Base) do
-        on_event :agent_end do |data, agent|
-          fired = true
-        end
-      end
-
-      # Need to capture the 'fired' variable in the hook closure
-      # Since the hook is defined at class level, we use a different approach
       hook_results = []
 
-      ext_class2 = Class.new(RubyPi::Extensions::Base)
-      ext_class2.on_event(:agent_end) { |data, _agent| hook_results << :agent_end_fired }
+      ext_class = Class.new(RubyPi::Extensions::Base)
+      ext_class.on_event(:agent_end) { |data, _agent| hook_results << :agent_end_fired }
 
-      agent.use(ext_class2)
+      agent.use(ext_class)
       agent.run("Hello")
 
       expect(hook_results).to include(:agent_end_fired)
+    end
+
+    it "tracks registered extension classes for introspection" do
+      ext_class_a = Class.new(RubyPi::Extensions::Base)
+      ext_class_b = Class.new(RubyPi::Extensions::Base)
+
+      agent.use(ext_class_a)
+      agent.use(ext_class_b)
+
+      expect(agent.extensions).to eq([ext_class_a, ext_class_b])
+    end
+  end
+
+  describe "per-agent configuration (#33)" do
+    it "accepts a config: kwarg" do
+      custom_config = RubyPi::Configuration.new
+      custom_config.openai_api_key = "per-agent-key"
+
+      agent = described_class.new(
+        system_prompt: "test",
+        model: model,
+        config: custom_config
+      )
+
+      expect(agent.config).to eq(custom_config)
+      expect(agent.config.openai_api_key).to eq("per-agent-key")
+    end
+
+    it "falls back to global config when no per-agent config given" do
+      agent = described_class.new(
+        system_prompt: "test",
+        model: model
+      )
+
+      expect(agent.effective_config).to eq(RubyPi.configuration)
+    end
+
+    it "returns per-agent config from effective_config when provided" do
+      custom_config = RubyPi::Configuration.new
+      custom_config.max_retries = 99
+
+      agent = described_class.new(
+        system_prompt: "test",
+        model: model,
+        config: custom_config
+      )
+
+      expect(agent.effective_config).to eq(custom_config)
+      expect(agent.effective_config.max_retries).to eq(99)
+    end
+  end
+
+  describe "execution options (#36)" do
+    it "accepts execution_mode and tool_timeout kwargs" do
+      agent = described_class.new(
+        system_prompt: "test",
+        model: model,
+        execution_mode: :sequential,
+        tool_timeout: 60
+      )
+
+      # These are passed through to Loop — we verify no error on construction
+      expect(agent).to be_a(described_class)
     end
   end
 

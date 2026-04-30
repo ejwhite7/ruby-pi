@@ -3,7 +3,7 @@
 # spec/ruby_pi/tools/registry_spec.rb
 #
 # Tests for RubyPi::Tools::Registry — verifies registration, lookup,
-# filtering, subset creation, and error handling.
+# filtering, subset creation, thread safety, and configurable logging.
 
 require_relative "../../../lib/ruby_pi/tools/schema"
 require_relative "../../../lib/ruby_pi/tools/definition"
@@ -47,7 +47,7 @@ RSpec.describe RubyPi::Tools::Registry do
       expect(result).to eq(create_post)
     end
 
-    it "overwrites existing tool with same name and warns" do
+    it "overwrites existing tool with same name silently (no logger)" do
       registry.register(create_post)
       replacement = RubyPi::Tools::Definition.new(
         name: "create_post",
@@ -55,9 +55,25 @@ RSpec.describe RubyPi::Tools::Registry do
         category: :other
       ) { |_| nil }
 
-      expect { registry.register(replacement) }.to output(/overwriting/).to_stderr
+      # With no logger configured, overwrite is silent (no warn to stderr)
+      expect { registry.register(replacement) }.not_to output.to_stderr
       expect(registry.find(:create_post).description).to eq("Replacement")
       expect(registry.size).to eq(1)
+    end
+
+    it "logs overwrite at debug level when logger is configured" do
+      logger = double("logger")
+      allow(RubyPi.configuration).to receive(:logger).and_return(logger)
+      expect(logger).to receive(:debug).with(/overwriting existing tool 'create_post'/)
+
+      registry.register(create_post)
+      replacement = RubyPi::Tools::Definition.new(
+        name: "create_post",
+        description: "Replacement",
+        category: :other
+      ) { |_| nil }
+
+      registry.register(replacement)
     end
 
     it "raises ArgumentError for non-Definition objects" do
@@ -203,6 +219,54 @@ RSpec.describe RubyPi::Tools::Registry do
     it "includes tool names" do
       registry.register(create_post)
       expect(registry.inspect).to include("create_post")
+    end
+  end
+
+  describe "thread safety" do
+    it "safely handles concurrent reads and writes" do
+      # Pre-populate with some tools
+      10.times do |i|
+        tool = RubyPi::Tools::Definition.new(
+          name: "tool_#{i}",
+          description: "Tool #{i}"
+        ) { |_| { id: i } }
+        registry.register(tool)
+      end
+
+      errors = []
+      threads = []
+
+      # Concurrent readers
+      5.times do
+        threads << Thread.new do
+          100.times do
+            registry.all
+            registry.names
+            registry.size
+            registry.find(:tool_0)
+            registry.by_category(:default)
+            registry.registered?(:tool_5)
+          end
+        rescue StandardError => e
+          errors << e
+        end
+      end
+
+      # Concurrent writer
+      threads << Thread.new do
+        100.times do |i|
+          tool = RubyPi::Tools::Definition.new(
+            name: "concurrent_#{i}",
+            description: "Concurrent tool #{i}"
+          ) { |_| { id: i } }
+          registry.register(tool)
+        end
+      rescue StandardError => e
+        errors << e
+      end
+
+      threads.each(&:join)
+      expect(errors).to be_empty
     end
   end
 end

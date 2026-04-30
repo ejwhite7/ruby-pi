@@ -10,7 +10,8 @@
 
 require "json"
 require "faraday"
-require "faraday/retry"
+# Issue #20: Removed faraday/retry — retry logic is handled by BaseProvider#complete
+# require "faraday/retry"
 require "faraday/net_http"
 require "concurrent-ruby"
 
