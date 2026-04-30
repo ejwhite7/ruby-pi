@@ -157,18 +157,23 @@ bundle exec rubocop
 
 ## Adding a New Context Transform
 
-1. Create an instance of `RubyPi::Context::Transform` with a block:
+`RubyPi::Context::Transform` is a module with factory methods, not a class. Use the built-in
+transforms or write a custom lambda:
 
 ```ruby
-transform = RubyPi::Context::Transform.new do |messages|
-  # Return a modified copy of messages
-  messages.reject { |m| m[:role] == "system" }
-end
+# Using built-in transforms:
+transform = RubyPi::Context::Transform.compose(
+  RubyPi::Context::Transform.inject_datetime,
+  RubyPi::Context::Transform.inject_user_preferences { |state| state.user_data[:prefs] }
+)
+
+# Or a custom lambda (receives Agent::State, mutates in place):
+transform = ->(state) { state.system_prompt += "\nExtra context." }
 ```
 
-2. Pass it to `Agent.new(context_transform: transform)`
+Pass it to `Agent.new(transform_context: transform)`.
 
-The block receives the full message array and must return a (possibly modified) array. Do not mutate the original -- return a new array.
+The callable receives the `Agent::State` object and can mutate it (typically appending to `system_prompt`).
 
 ---
 
@@ -176,8 +181,9 @@ The block receives the full message array and must return a (possibly modified) 
 
 1. Subclass `RubyPi::Extensions::Base`
 2. Use `on_event :event_name do |event| ... end` to subscribe to events
-3. Available events: `:turn_start`, `:turn_end`, `:text_delta`, `:tool_execution_start`, `:tool_execution_end`, `:before_tool_call`, `:after_tool_call`, `:agent_end`, `:error`
-4. Register the extension: `Agent.new(extensions: [MyExtension.new])`
+3. Available events: `:turn_start`, `:turn_end`, `:text_delta`, `:tool_execution_start`, `:tool_execution_end`, `:agent_end`, `:error`, `:compaction`
+   Note: `:before_tool_call` and `:after_tool_call` are constructor hooks (Procs on Agent::Core), not subscribable events.
+4. Register the extension: `agent.use(MyExtension)` (pass the CLASS, not an instance)
 
 ```ruby
 class MyExtension < RubyPi::Extensions::Base
@@ -195,7 +201,7 @@ end
 - **Integration tests** (`spec/integration/`): End-to-end agent loop tests. Stub all HTTP but let the real code path execute through Agent -> LLM -> Tools -> Context.
 - **No live API calls.** `WebMock.disable_net_connect!` is set globally in `spec_helper.rb`.
 - **Fast retries in tests.** `retry_base_delay` is set to `0.01` and `retry_max_delay` to `0.05` in the before-each block.
-- **CI matrix.** GitHub Actions runs against Ruby 3.2 and 3.3.
+- **CI matrix.** GitHub Actions runs against Ruby 3.2, 3.3, and 3.4.
 
 ---
 
