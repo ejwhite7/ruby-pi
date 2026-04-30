@@ -159,7 +159,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
         SSE
 
-        stub_request(:post, "#{base_url}:streamGenerateContent?key=test-gemini-key&alt=sse")
+        stub_request(:post, "#{base_url}:streamGenerateContent?alt=sse")
           .to_return(
             status: 200,
             headers: { "Content-Type" => "text/event-stream" },
@@ -210,18 +210,18 @@ RSpec.describe RubyPi::LLM::Gemini do
       it "makes exactly max_retries + 1 total attempts (max_retries: 3 = 4 attempts)" do
         # With max_retries: 3, we expect 1 initial attempt + 3 retries = 4 total.
         # This test verifies the off-by-one fix: previously only 3 attempts were made.
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(status: 500, body: "Server Error")
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
 
         # Verify exactly 4 requests were made (1 initial + 3 retries)
-        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key").times(4)
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent").times(4)
       end
 
       it "succeeds on the last retry attempt (attempt 4 of 4)" do
         # Fails 3 times, succeeds on 4th attempt (the 3rd retry)
-        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+        stub_request(:post, "#{base_url}:generateContent")
           .to_return(
             { status: 500, body: "Error 1" },
             { status: 500, body: "Error 2" },
@@ -239,7 +239,7 @@ RSpec.describe RubyPi::LLM::Gemini do
 
         response = provider.complete(messages: messages)
         expect(response.content).to eq("Success on 4th attempt")
-        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key").times(4)
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent").times(4)
       end
     end
 
