@@ -55,12 +55,37 @@ module RubyPi
         :fallback
       end
 
+      # Overrides BaseProvider#complete to skip the outer retry wrapper.
+      #
+      # Without this override, Fallback inherits BaseProvider#complete which
+      # wraps perform_complete in a retry loop. Since perform_complete calls
+      # @primary.complete (which has its own retry loop) and @fallback.complete
+      # (also with retries), the retry layers compose multiplicatively:
+      #   outer_retries x (primary_retries + fallback_retries)
+      # With default max_retries=3, that's 4 x (4 + 4) = 32 total attempts
+      # instead of the expected 4 + 4 = 8.
+      #
+      # This override calls perform_complete directly — no outer retry loop.
+      # Each inner provider handles its own retries independently.
+      #
+      # @param messages [Array<Hash>] conversation messages
+      # @param tools [Array<Hash>] tool/function definitions
+      # @param stream [Boolean] whether to enable streaming mode
+      # @yield [event] yields StreamEvent objects when streaming
+      # @return [RubyPi::LLM::Response]
+      def complete(messages:, tools: [], stream: false, &block)
+        perform_complete(messages: messages, tools: tools, stream: stream, &block)
+      end
+
       private
 
       # Attempts the completion with the primary provider. If it fails with
       # a retryable error (ApiError, RateLimitError, TimeoutError, ProviderError),
       # the request is retried with the fallback provider. Authentication errors
       # propagate immediately since they indicate misconfiguration.
+      #
+      # Each inner provider handles its own retries via BaseProvider#complete,
+      # so this method does NOT add an additional retry layer.
       #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
