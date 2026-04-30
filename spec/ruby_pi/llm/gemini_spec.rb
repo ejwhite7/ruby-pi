@@ -146,7 +146,39 @@ RSpec.describe RubyPi::LLM::Gemini do
       end
     end
 
-    context "retry on transient errors" do
+    context "real streaming via on_data callback" do
+      # Verifies that the streaming implementation uses Faraday's on_data
+      # callback to deliver chunks incrementally as they arrive from the API.
+      it "configures on_data for incremental SSE delivery" do
+        sse_body = <<~SSE
+          data: {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
+
+          data: {"candidates":[{"content":{"parts":[{"text":" World"}],"role":"model"}}]}
+
+          data: {"candidates":[{"content":{"parts":[{"text":"!"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":3,"totalTokenCount":4}}
+
+        SSE
+
+        stub_request(:post, "#{base_url}:streamGenerateContent?key=test-gemini-key&alt=sse")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "text/event-stream" },
+            body: sse_body
+          )
+
+        event_types = []
+        response = provider.complete(messages: messages, stream: true) do |event|
+          event_types << event.type
+        end
+
+        # Verify incremental text deltas were yielded via the on_data callback
+        expect(event_types.count(:text_delta)).to eq(3)
+        expect(event_types.last).to eq(:done)
+        expect(response.content).to eq("Hello World!")
+      end
+    end
+
+        context "retry on transient errors" do
       it "retries on 500 errors and succeeds" do
         call_count = 0
 
@@ -173,6 +205,41 @@ RSpec.describe RubyPi::LLM::Gemini do
           .to_return(status: 500, body: "Server Error")
 
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
+      end
+
+      it "makes exactly max_retries + 1 total attempts (max_retries: 3 = 4 attempts)" do
+        # With max_retries: 3, we expect 1 initial attempt + 3 retries = 4 total.
+        # This test verifies the off-by-one fix: previously only 3 attempts were made.
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(status: 500, body: "Server Error")
+
+        expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
+
+        # Verify exactly 4 requests were made (1 initial + 3 retries)
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key").times(4)
+      end
+
+      it "succeeds on the last retry attempt (attempt 4 of 4)" do
+        # Fails 3 times, succeeds on 4th attempt (the 3rd retry)
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(
+            { status: 500, body: "Error 1" },
+            { status: 500, body: "Error 2" },
+            { status: 500, body: "Error 3" },
+            { status: 200, headers: { "Content-Type" => "application/json" },
+              body: JSON.generate({
+                candidates: [{
+                  content: { parts: [{ text: "Success on 4th attempt" }], role: "model" },
+                  finishReason: "STOP"
+                }],
+                usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 3, totalTokenCount: 4 }
+              })
+            }
+          )
+
+        response = provider.complete(messages: messages)
+        expect(response.content).to eq("Success on 4th attempt")
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key").times(4)
       end
     end
 

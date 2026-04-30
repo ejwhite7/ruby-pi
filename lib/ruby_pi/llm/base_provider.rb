@@ -75,7 +75,12 @@ module RubyPi
           # Authentication errors are not retryable — raise immediately
           raise
         rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError => e
-          if attempt < @max_retries
+          # Retry up to max_retries times AFTER the initial attempt.
+          # With max_retries: 3, attempt goes 1 (initial), 2, 3, 4 — the condition
+          # `attempt <= @max_retries` allows retries on attempts 1..3, so we get
+          # 3 retries + 1 initial = 4 total attempts. Previously used `< @max_retries`
+          # which was off-by-one (only 2 retries with max_retries: 3).
+          if attempt <= @max_retries
             delay = calculate_backoff(attempt)
             log_retry(attempt, delay, e)
             sleep(delay)
