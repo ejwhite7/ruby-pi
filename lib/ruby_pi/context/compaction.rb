@@ -87,9 +87,14 @@ module RubyPi
         # Emit compaction event if an emitter is available
         @emitter&.emit(:compaction, dropped_count: droppable.size, summary: summary)
 
-        # Build the compacted history: summary as a system-context message + preserved
+        # Build the compacted history: summary as a user-context message + preserved.
+        # IMPORTANT: The summary must NOT use role: :system. If it did, the Anthropic
+        # provider's build_request_body would overwrite the actual system prompt with
+        # this summary (because it extracts the LAST system message as the top-level
+        # `system:` parameter). Using role: :user with a clear prefix ensures the
+        # real system prompt remains the authoritative system message across all providers.
         summary_message = {
-          role: :system,
+          role: :user,
           content: "[Conversation Summary]\n#{summary}"
         }
 

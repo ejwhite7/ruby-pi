@@ -84,6 +84,9 @@ module RubyPi
       # Structured content (Arrays, Hashes) is preserved for multimodal content
       # blocks (e.g., vision messages with image_url content parts).
       #
+      # Issue #21: When streaming, includes `stream_options: { include_usage: true }`
+      # so OpenAI returns usage data in the final SSE chunk.
+      #
       # @param messages [Array<Hash>] conversation messages
       # @param tools [Array<Hash>] tool definitions
       # @param stream [Boolean] whether streaming is enabled
@@ -94,7 +97,12 @@ module RubyPi
           messages: messages.map { |msg| format_message(msg) }
         }
 
-        body[:stream] = true if stream
+        if stream
+          body[:stream] = true
+          # Issue #21: Request usage data in streaming mode. OpenAI supports
+          # returning token usage in the final SSE chunk when this option is set.
+          body[:stream_options] = { include_usage: true }
+        end
 
         unless tools.empty?
           body[:tools] = tools.map { |t| format_tool(t) }
@@ -241,6 +249,10 @@ module RubyPi
 
       # Executes a streaming request to the OpenAI API, yielding events.
       #
+      # Issue #21: Parses usage data from the final SSE chunk (when
+      # stream_options: { include_usage: true } is set in the request).
+      # The final chunk contains the aggregated token usage.
+      #
       # @param body [Hash] the request body
       # @yield [event] StreamEvent objects
       # @return [RubyPi::LLM::Response] final aggregated response
@@ -253,62 +265,107 @@ module RubyPi
         accumulated_text = +""
         tool_call_accumulators = {}
         finish_reason = nil
+        # Issue #21: Accumulate usage data from the final SSE chunk
+        streaming_usage = {}
+
+        # Buffer for incomplete SSE lines across on_data chunks. Faraday's
+        # on_data callback delivers raw bytes as they arrive from the network,
+        # which may split SSE events mid-line. We accumulate a line buffer and
+        # process complete lines incrementally so that deltas reach the caller
+        # as soon as each SSE event is fully received.
+        sse_buffer = +""
 
         response = conn.post("/v1/chat/completions") do |req|
           req.headers["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
-        end
 
-        handle_error_response(response) unless response.success?
+          # Use Faraday's on_data callback for real incremental streaming.
+          # Without this, Faraday buffers the entire response body before
+          # returning — no deltas reach the caller until the model finishes
+          # generating (fake streaming).
+          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+            sse_buffer << chunk
+            # Process all complete lines in the buffer
+            while (line_end = sse_buffer.index("\n"))
+              line = sse_buffer.slice!(0, line_end + 1).strip
+              next if line.empty?
+              next unless line.start_with?("data: ")
 
-        # Parse SSE events from the response body
-        parse_sse_events(response.body) do |data|
-          choices = data["choices"] || []
-          choice = choices.first
-          next unless choice
+              data_str = line.sub(/\Adata: /, "")
+              next if data_str == "[DONE]"
 
-          delta = choice["delta"] || {}
-          finish_reason = choice["finish_reason"] if choice["finish_reason"]
-
-          # Handle text content deltas
-          if delta.key?("content") && delta["content"]
-            text = delta["content"]
-            accumulated_text << text
-            block.call(StreamEvent.new(type: :text_delta, data: text))
-          end
-
-          # Handle tool call deltas
-          if delta.key?("tool_calls")
-            delta["tool_calls"].each do |tc_delta|
-              index = tc_delta["index"] || 0
-
-              # Initialize accumulator for this tool call
-              tool_call_accumulators[index] ||= { id: nil, name: +"", arguments: +"" }
-              acc = tool_call_accumulators[index]
-
-              acc[:id] = tc_delta["id"] if tc_delta["id"]
-
-              if tc_delta.dig("function", "name")
-                acc[:name] << tc_delta["function"]["name"]
+              begin
+                data = JSON.parse(data_str)
+              rescue JSON::ParserError
+                next
               end
 
-              if tc_delta.dig("function", "arguments")
-                acc[:arguments] << tc_delta["function"]["arguments"]
+              # Issue #21: Capture usage data from the final SSE chunk.
+              # OpenAI sends usage in a dedicated chunk when include_usage is true.
+              if data.key?("usage") && data["usage"]
+                usage_info = data["usage"]
+                streaming_usage = {
+                  prompt_tokens: usage_info["prompt_tokens"],
+                  completion_tokens: usage_info["completion_tokens"],
+                  total_tokens: usage_info["total_tokens"]
+                }
               end
 
-              block.call(StreamEvent.new(type: :tool_call_delta, data: {
-                index: index,
-                id: acc[:id],
-                name: acc[:name],
-                arguments_fragment: tc_delta.dig("function", "arguments") || ""
-              }))
+              # Process this SSE event
+              choices = data["choices"] || []
+              choice = choices.first
+              next unless choice
+
+              delta = choice["delta"] || {}
+              finish_reason = choice["finish_reason"] if choice["finish_reason"]
+
+              # Handle text content deltas
+              if delta.key?("content") && delta["content"]
+                text = delta["content"]
+                accumulated_text << text
+                block.call(StreamEvent.new(type: :text_delta, data: text))
+              end
+
+              # Handle tool call deltas
+              if delta.key?("tool_calls")
+                delta["tool_calls"].each do |tc_delta|
+                  index = tc_delta["index"] || 0
+
+                  # Initialize accumulator for this tool call
+                  tool_call_accumulators[index] ||= { id: nil, name: +"", arguments: +"" }
+                  acc = tool_call_accumulators[index]
+
+                  acc[:id] = tc_delta["id"] if tc_delta["id"]
+
+                  if tc_delta.dig("function", "name")
+                    acc[:name] << tc_delta["function"]["name"]
+                  end
+
+                  if tc_delta.dig("function", "arguments")
+                    acc[:arguments] << tc_delta["function"]["arguments"]
+                  end
+
+                  block.call(StreamEvent.new(type: :tool_call_delta, data: {
+                    index: index,
+                    id: acc[:id],
+                    name: acc[:name],
+                    arguments_fragment: tc_delta.dig("function", "arguments") || ""
+                  }))
+                end
+              end
             end
           end
         end
 
+        handle_error_response(response) unless response.success?
+
         # Build final tool calls from accumulators
+        # Issue #12: Guard JSON.parse against empty strings. An empty string
+        # is truthy in Ruby, so the previous `empty? ? {} : JSON.parse(...)` check
+        # was correct for empty strings, but we also guard against malformed JSON
+        # from truncated streams.
         tool_calls = tool_call_accumulators.sort_by { |k, _| k }.map do |_, acc|
-          arguments = acc[:arguments].empty? ? {} : JSON.parse(acc[:arguments])
+          arguments = safe_parse_arguments(acc[:arguments])
           ToolCall.new(id: acc[:id], name: acc[:name], arguments: arguments)
         end
 
@@ -318,7 +375,7 @@ module RubyPi
         Response.new(
           content: accumulated_text.empty? ? nil : accumulated_text,
           tool_calls: tool_calls,
-          usage: {},
+          usage: streaming_usage,
           finish_reason: normalize_finish_reason(finish_reason)
         )
       end
@@ -334,6 +391,11 @@ module RubyPi
 
       # Parses an OpenAI Chat Completions response into a normalized Response.
       #
+      # Issue #12: Guards JSON.parse(func["arguments"]) against empty strings.
+      # An empty string is truthy in Ruby but causes JSON::ParserError. We now
+      # check that arguments is a non-empty string before parsing, and rescue
+      # JSON::ParserError to wrap in a ProviderError.
+      #
       # @param data [Hash] parsed JSON response from OpenAI
       # @return [RubyPi::LLM::Response]
       def parse_response(data)
@@ -345,7 +407,7 @@ module RubyPi
 
         (message["tool_calls"] || []).each do |tc|
           func = tc["function"] || {}
-          arguments = func["arguments"] ? JSON.parse(func["arguments"]) : {}
+          arguments = safe_parse_arguments(func["arguments"])
           tool_calls << ToolCall.new(
             id: tc["id"],
             name: func["name"],
@@ -383,6 +445,35 @@ module RubyPi
         when "length" then "max_tokens"
         else reason
         end
+      end
+
+      # Safely parses a JSON arguments string into a Hash.
+      #
+      # Issue #12: Handles nil, empty strings, and malformed JSON gracefully.
+      # Previously, `func["arguments"] ? JSON.parse(func["arguments"]) : {}`
+      # would crash on empty strings (truthy but unparseable). Now we validate
+      # the input and rescue parse errors with a typed ProviderError.
+      #
+      # @param raw_args [String, Hash, nil] raw arguments from the API
+      # @return [Hash] parsed arguments hash
+      # @raise [RubyPi::ProviderError] if JSON parsing fails on non-empty input
+      def safe_parse_arguments(raw_args)
+        # Already a Hash — pass through
+        return raw_args if raw_args.is_a?(Hash)
+
+        # nil or non-string — return empty hash
+        return {} unless raw_args.is_a?(String)
+
+        # Empty or whitespace-only string — return empty hash
+        return {} if raw_args.strip.empty?
+
+        # Attempt to parse the JSON string
+        JSON.parse(raw_args)
+      rescue JSON::ParserError => e
+        raise RubyPi::ProviderError.new(
+          "Failed to parse tool call arguments from OpenAI: #{e.message} (raw: #{raw_args.inspect})",
+          provider: :openai
+        )
       end
     end
   end

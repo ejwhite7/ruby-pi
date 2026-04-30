@@ -14,6 +14,7 @@ module RubyPi
     # represents a specific moment or occurrence:
     #
     # - :text_delta           — An incremental text chunk from the LLM stream.
+    # - :tool_call_delta      — An incremental tool call chunk from the LLM stream.
     # - :tool_execution_start — A tool is about to be executed.
     # - :tool_execution_end   — A tool has finished executing.
     # - :turn_start           — A new think-act-observe cycle is beginning.
@@ -23,6 +24,7 @@ module RubyPi
     # - :compaction           — Context compaction was triggered.
     EVENTS = %i[
       text_delta
+      tool_call_delta
       tool_execution_start
       tool_execution_end
       turn_start
@@ -65,6 +67,12 @@ module RubyPi
       # rescued individually — one failing handler does not prevent others
       # from executing.
       #
+      # If a handler raises during a non-error event, the error is re-emitted
+      # as an :error event so subscribers can observe it. To prevent infinite
+      # recursion, errors raised inside :error event handlers are silently
+      # swallowed — they are not re-emitted. This ensures that a broken error
+      # handler cannot crash the agent loop.
+      #
       # @param event [Symbol] the event type to fire
       # @param data [Hash] arbitrary payload passed to each handler
       # @return [void]
@@ -73,9 +81,10 @@ module RubyPi
         event_handlers[event].each do |handler|
           handler.call(data)
         rescue StandardError => e
-          # Log but do not propagate handler errors — they should not break
-          # the agent loop. Emit an :error event if this is not already an
-          # error event (to prevent infinite recursion).
+          # Guard against infinite recursion: if we are already emitting an
+          # :error event and the error handler itself raises, we must not
+          # re-emit — that would cause unbounded recursion. Silently discard
+          # the secondary error instead.
           if event != :error
             emit(:error, error: e, source: :event_handler, event: event)
           end

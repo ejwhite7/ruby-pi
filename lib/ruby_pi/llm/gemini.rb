@@ -172,13 +172,31 @@ module RubyPi
         declaration
       end
 
+      # Returns the default HTTP headers for Gemini API requests.
+      #
+      # Issue #13: The API key is now sent via the `x-goog-api-key` header
+      # instead of being interpolated into the URL query string. This prevents
+      # the key from leaking into debug logs, backtraces, and HTTP intermediary
+      # logs (proxies, load balancers, etc.).
+      #
+      # @return [Hash] headers hash
+      def default_headers
+        {
+          "x-goog-api-key" => @api_key.to_s
+        }
+      end
+
       # Executes a standard (non-streaming) request to the Gemini API.
+      #
+      # Issue #13: Removed API key from the URL query string. The key is now
+      # sent via the `x-goog-api-key` header (set in default_headers) to
+      # avoid leaking credentials into logs and backtraces.
       #
       # @param body [Hash] the request body
       # @return [RubyPi::LLM::Response]
       def perform_standard_request(body)
-        conn = build_connection(base_url: BASE_URL)
-        url = "/#{API_VERSION}/models/#{@model}:generateContent?key=#{@api_key}"
+        conn = build_connection(base_url: BASE_URL, headers: default_headers)
+        url = "/#{API_VERSION}/models/#{@model}:generateContent"
 
         response = conn.post(url) do |req|
           req.headers["Content-Type"] = "application/json"
@@ -191,58 +209,89 @@ module RubyPi
 
       # Executes a streaming request to the Gemini API, yielding events.
       #
+      # Issue #13: Removed API key from the URL query string. The key is now
+      # sent via the `x-goog-api-key` header (set in default_headers).
+      #
       # @param body [Hash] the request body
       # @yield [event] StreamEvent objects
       # @return [RubyPi::LLM::Response] final aggregated response
       def perform_streaming_request(body, &block)
-        conn = build_connection(base_url: BASE_URL)
-        url = "/#{API_VERSION}/models/#{@model}:streamGenerateContent?key=#{@api_key}&alt=sse"
+        conn = build_connection(base_url: BASE_URL, headers: default_headers)
+        url = "/#{API_VERSION}/models/#{@model}:streamGenerateContent?alt=sse"
 
         accumulated_text = +""
         accumulated_tool_calls = []
         usage_data = {}
 
+        # Buffer for incomplete SSE lines across on_data chunks. Faraday's
+        # on_data callback delivers raw bytes as they arrive from the network,
+        # which may split SSE events mid-line. We accumulate a line buffer and
+        # process complete lines incrementally so that deltas reach the caller
+        # as soon as each SSE event is fully received.
+        sse_buffer = +""
+
         response = conn.post(url) do |req|
           req.headers["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
+
+          # Use Faraday's on_data callback for real incremental streaming.
+          # Without this, Faraday buffers the entire response body before
+          # returning — no deltas reach the caller until the model finishes
+          # generating (fake streaming).
+          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+            sse_buffer << chunk
+            # Process all complete lines in the buffer
+            while (line_end = sse_buffer.index("\n"))
+              line = sse_buffer.slice!(0, line_end + 1).strip
+              next if line.empty?
+              next unless line.start_with?("data: ")
+
+              data_str = line.sub(/\Adata: /, "")
+              next if data_str == "[DONE]"
+
+              begin
+                data = JSON.parse(data_str)
+              rescue JSON::ParserError
+                next
+              end
+
+              # Process this SSE event
+              candidates = data.dig("candidates") || []
+              candidate = candidates.first
+              next unless candidate
+
+              parts = candidate.dig("content", "parts") || []
+              parts.each do |part|
+                if part.key?("text")
+                  text_chunk = part["text"]
+                  accumulated_text << text_chunk
+                  block.call(StreamEvent.new(type: :text_delta, data: text_chunk))
+                elsif part.key?("functionCall")
+                  fc = part["functionCall"]
+                  tool_call = ToolCall.new(
+                    id: "gemini_#{accumulated_tool_calls.length}",
+                    name: fc["name"],
+                    arguments: fc["args"] || {}
+                  )
+                  accumulated_tool_calls << tool_call
+                  block.call(StreamEvent.new(type: :tool_call_delta, data: tool_call.to_h))
+                end
+              end
+
+              # Capture usage metadata if present
+              if data.key?("usageMetadata")
+                meta = data["usageMetadata"]
+                usage_data = {
+                  prompt_tokens: meta["promptTokenCount"],
+                  completion_tokens: meta["candidatesTokenCount"],
+                  total_tokens: meta["totalTokenCount"]
+                }
+              end
+            end
+          end
         end
 
         handle_error_response(response) unless response.success?
-
-        # Parse SSE events from the response body
-        parse_sse_events(response.body) do |data|
-          candidates = data.dig("candidates") || []
-          candidate = candidates.first
-          next unless candidate
-
-          parts = candidate.dig("content", "parts") || []
-          parts.each do |part|
-            if part.key?("text")
-              text_chunk = part["text"]
-              accumulated_text << text_chunk
-              block.call(StreamEvent.new(type: :text_delta, data: text_chunk))
-            elsif part.key?("functionCall")
-              fc = part["functionCall"]
-              tool_call = ToolCall.new(
-                id: "gemini_#{accumulated_tool_calls.length}",
-                name: fc["name"],
-                arguments: fc["args"] || {}
-              )
-              accumulated_tool_calls << tool_call
-              block.call(StreamEvent.new(type: :tool_call_delta, data: tool_call.to_h))
-            end
-          end
-
-          # Capture usage metadata if present
-          if data.key?("usageMetadata")
-            meta = data["usageMetadata"]
-            usage_data = {
-              prompt_tokens: meta["promptTokenCount"],
-              completion_tokens: meta["candidatesTokenCount"],
-              total_tokens: meta["totalTokenCount"]
-            }
-          end
-        end
 
         # Signal completion
         block.call(StreamEvent.new(type: :done))

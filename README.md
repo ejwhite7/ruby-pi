@@ -73,15 +73,19 @@ registry = RubyPi::Tools::Registry.new
 registry.register(weather)
 
 model = RubyPi::LLM.model(:gemini, "gemini-2.0-flash")
-agent = RubyPi::Agent.new(model: model, tools: registry, stream: true)
+agent = RubyPi::Agent.new(
+  system_prompt: "You are a helpful weather assistant.",
+  model: model,
+  tools: registry
+)
 
 # 4. Subscribe to events
-agent.on(:text_delta) { |e| print e[:data] }
-agent.on(:tool_execution_end) { |e| puts "\n[Tool] #{e[:name]} => #{e[:result]}" }
+agent.on(:text_delta) { |e| print e[:content] }
+agent.on(:tool_execution_end) { |e| puts "\n[Tool] #{e[:tool_name]} => #{e[:result].value}" }
 
 # 5. Run
 result = agent.run("What's the weather in San Francisco?")
-puts "\nDone: #{result.output}"
+puts "\nDone: #{result.content}"
 ```
 
 ---
@@ -160,6 +164,12 @@ Authentication errors (401/403) are **not** retried with the fallback -- they in
 ### RubyPi::Tools
 
 A lightweight DSL for defining tools (functions) that LLMs can call, plus a registry and executor for dispatching them.
+
+> **`RubyPi::Tool` vs `RubyPi::Tools`:** `RubyPi::Tool.define(...)` is the convenience API
+> for creating tool definitions with a clean syntax. `RubyPi::Tools` is the internal namespace
+> containing the supporting classes (`Definition`, `Registry`, `Executor`, `Result`, `Schema`).
+> Use `RubyPi::Tool.define` in application code; reference `RubyPi::Tools::*` when you need
+> direct access to the underlying components.
 
 #### Defining Tools
 
@@ -247,14 +257,19 @@ The Agent implements a **think-act-observe** loop: send messages to the LLM, exe
 
 ```ruby
 agent = RubyPi::Agent.new(
+  system_prompt: "You are a helpful assistant.",  # required: system-level instruction
   model: model,                        # required: an LLM provider instance
   tools: registry,                     # optional: a Tools::Registry
-  stream: false,                       # optional: enable streaming
-  max_iterations: 10,                  # optional: loop safety limit
-  context_compaction: compaction,      # optional: Context::Compaction instance
-  context_transform: transform,        # optional: Context::Transform instance
-  extensions: [my_extension]           # optional: Extension instances
+  max_iterations: 10,                  # optional: loop safety limit (default: 10)
+  compaction: compaction,              # optional: Context::Compaction instance
+  transform_context: transform,        # optional: context transform callable
+  before_tool_call: ->(tc) { },        # optional: pre-tool-execution hook
+  after_tool_call: ->(tc, r) { },      # optional: post-tool-execution hook
+  user_data: {}                        # optional: arbitrary data for transforms/extensions
 )
+
+# Extensions are registered after construction via `use` (takes a CLASS, not an instance):
+agent.use(MetricsExtension)
 ```
 
 #### Running the Agent
@@ -262,11 +277,10 @@ agent = RubyPi::Agent.new(
 ```ruby
 # Single run
 result = agent.run("What is the weather in Tokyo?")
-result.output            # => "The weather in Tokyo is..."
+result.content           # => "The weather in Tokyo is..."
 result.messages          # => full conversation history
 result.tool_calls_made   # => [{ name: "get_weather", ... }, ...]
-result.iterations        # => 2
-result.stop_reason       # => :complete or :max_iterations
+result.turns             # => 2
 
 # Continue the conversation
 result2 = agent.continue("And in London?")
@@ -279,11 +293,13 @@ Subscribe to lifecycle events for logging, monitoring, or custom behavior:
 ```ruby
 agent.on(:turn_start)          { |e| puts "Turn #{e[:iteration]} starting" }
 agent.on(:turn_end)            { |e| puts "Turn #{e[:iteration]} ended" }
-agent.on(:text_delta)          { |e| print e[:data] }
+agent.on(:text_delta)          { |e| print e[:content] }
 agent.on(:tool_execution_start){ |e| puts "Calling #{e[:tool_name]}" }
-agent.on(:tool_execution_end)  { |e| puts "#{e[:name]} => #{e[:result]}" }
-agent.on(:before_tool_call)    { |e| puts "About to call #{e[:tool_name]}" }
-agent.on(:after_tool_call)     { |e| puts "Finished #{e[:tool_name]}" }
+agent.on(:tool_execution_end)  { |e| puts "#{e[:tool_name]} => #{e[:result].value}" }
+# Note: before_tool_call and after_tool_call are constructor hooks (Procs),
+# not subscribable events. Use the constructor kwargs instead:
+#   before_tool_call: ->(tc) { puts "About to call #{tc.name}" }
+#   after_tool_call: ->(tc, result) { puts "Finished #{tc.name}" }
 agent.on(:agent_end)           { |e| puts "Agent finished" }
 agent.on(:error)               { |e| warn "Error: #{e[:error].message}" }
 ```
@@ -300,11 +316,16 @@ Prevent unbounded context growth by compacting older messages:
 
 ```ruby
 compaction = RubyPi::Context::Compaction.new(
-  max_tokens: 4000,         # trigger compaction above this threshold
-  strategy: :truncate       # :truncate removes oldest messages
+  summary_model: summary_model,  # required: LLM provider for generating summaries
+  max_tokens: 4000,              # optional: trigger compaction above this threshold (default: 8000)
+  preserve_last_n: 4             # optional: always keep the last N messages (default: 4)
 )
 
-agent = RubyPi::Agent.new(model: model, context_compaction: compaction)
+agent = RubyPi::Agent.new(
+  system_prompt: "You are helpful.",
+  model: model,
+  compaction: compaction
+)
 ```
 
 #### Transform
@@ -312,12 +333,23 @@ agent = RubyPi::Agent.new(model: model, context_compaction: compaction)
 Apply arbitrary transformations to the message list before each LLM call:
 
 ```ruby
-transform = RubyPi::Context::Transform.new do |messages|
-  # Inject a system prompt at the beginning
-  [{ role: "system", content: "You are a helpful Ruby assistant." }] + messages
+# Transform is a module with factory methods, not a class.
+# Use the built-in transforms or compose your own:
+transform = RubyPi::Context::Transform.compose(
+  RubyPi::Context::Transform.inject_datetime,
+  RubyPi::Context::Transform.inject_user_preferences { |state| state.user_data[:prefs] }
+)
+
+# Or write a custom transform as a lambda that receives the Agent::State:
+custom_transform = ->(state) do
+  state.system_prompt += "\n\nAdditional context here."
 end
 
-agent = RubyPi::Agent.new(model: model, context_transform: transform)
+agent = RubyPi::Agent.new(
+  system_prompt: "You are a helpful Ruby assistant.",
+  model: model,
+  transform_context: transform
+)
 ```
 
 ---
@@ -349,9 +381,13 @@ end
 
 ```ruby
 agent = RubyPi::Agent.new(
-  model: model,
-  extensions: [MetricsExtension.new, AnotherExtension.new]
+  system_prompt: "You are helpful.",
+  model: model
 )
+
+# Register extensions using `use` — pass the CLASS, not an instance:
+agent.use(MetricsExtension)
+agent.use(AnotherExtension)
 ```
 
 Extensions receive the same event payloads as `agent.on(...)` callbacks. Use them when you want reusable, self-contained behavior modules.

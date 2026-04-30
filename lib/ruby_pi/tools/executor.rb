@@ -57,9 +57,21 @@ module RubyPi
       # Tools are looked up in the registry; if a tool is not found, a failure
       # Result is returned for that call.
       #
+      # Issue #17: Raises NoToolsRegisteredError if the registry is nil and
+      # tool calls are attempted, preventing a confusing NoMethodError.
+      #
       # @param calls [Array<Hash>] Tool call requests, each with :name and :arguments.
       # @return [Array<RubyPi::Tools::Result>] Results in the same order as the calls.
+      # @raise [RubyPi::NoToolsRegisteredError] if registry is nil
       def execute(calls)
+        # Issue #17: Guard against nil registry — if the LLM hallucinated tool
+        # calls but no tools are registered, raise a typed error immediately
+        # rather than crashing with NoMethodError on nil.find.
+        if @registry.nil?
+          raise RubyPi::NoToolsRegisteredError,
+                "Model returned #{calls.size} tool call(s) but no tools are registered"
+        end
+
         case @mode
         when :parallel
           execute_parallel(calls)
@@ -83,6 +95,16 @@ module RubyPi
       # Each call is dispatched as a Future on the global I/O thread pool.
       # Results are collected in order, respecting the per-tool timeout.
       #
+      # Issue #10: Uses future.wait(@timeout) + future.complete? to distinguish
+      # a legitimate nil return value from a timeout. Previously, the || operator
+      # treated nil return values as timeouts.
+      #
+      # Issue #11: After detecting a timeout, attempts to cancel the future.
+      # Note: Ruby threads cannot be forcibly killed safely; we use the future's
+      # cancellation mechanism which sets a flag. The underlying thread may
+      # continue running until it reaches a natural exit point. This is a known
+      # tradeoff — hard cancellation in Ruby risks corrupted state.
+      #
       # @param calls [Array<Hash>] The tool call requests.
       # @return [Array<RubyPi::Tools::Result>] Ordered results.
       def execute_parallel(calls)
@@ -94,16 +116,56 @@ module RubyPi
 
         # Collect results, respecting the configured timeout for each future.
         futures.map do |future|
-          future.value(@timeout) || Result.new(
-            name: "unknown",
-            success: false,
-            error: "Tool execution timed out after #{@timeout}s",
-            duration_ms: @timeout * 1000.0
-          )
+          # Issue #10: Wait for the future to complete, then check its state
+          # explicitly. Future#value returns nil both on timeout AND when the
+          # block legitimately returned nil, so we cannot use || to distinguish.
+          future.wait(@timeout)
+
+          if future.complete?
+            if future.fulfilled?
+              # Future completed successfully — return its value (which may be nil)
+              future.value
+            else
+              # Future was rejected (raised an exception within the block).
+              # This shouldn't normally happen since execute_single rescues
+              # internally, but handle it defensively.
+              error = future.reason
+              Result.new(
+                name: "unknown",
+                success: false,
+                error: "#{error.class}: #{error.message}",
+                duration_ms: @timeout * 1000.0
+              )
+            end
+          else
+            # Issue #11: Future did not complete within the timeout window.
+            # Attempt to cancel the future to signal the thread to stop.
+            # Concurrent::Future does not support hard cancellation — the
+            # underlying thread will continue until it naturally exits.
+            # This is the safest approach in Ruby since Thread#raise/Thread#kill
+            # can interrupt mid-mutation and corrupt shared state.
+            future.cancel if future.respond_to?(:cancel)
+
+            Result.new(
+              name: "unknown",
+              success: false,
+              error: "Tool execution timed out after #{@timeout}s",
+              duration_ms: @timeout * 1000.0
+            )
+          end
         end
       end
 
       # Executes a single tool call with error handling and timing.
+      #
+      # Issue #9: Replaced the stdlib timeout mechanism with a thread+join approach for
+      # sequential mode. The stdlib timeout uses Thread#raise internally, which
+      # is unsafe — it can interrupt code mid-mutation, leak file handles,
+      # and corrupt state. The thread+join approach runs the tool in a
+      # separate thread and waits with a timeout; if the thread doesn't
+      # finish in time, we report a timeout error. The worker thread is
+      # left running (it cannot be safely killed in Ruby) but its result
+      # is discarded.
       #
       # @param call [Hash] A tool call with :name and :arguments keys.
       # @return [RubyPi::Tools::Result] The execution result.
@@ -123,34 +185,50 @@ module RubyPi
           )
         end
 
-        # Execute the tool with timeout and error handling
+        # Execute the tool with a safe timeout mechanism.
+        # Instead of the stdlib timeout (which uses Thread#raise and is unsafe),
+        # we spawn a worker thread and join with a timeout.
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        begin
-          value = Timeout.timeout(@timeout) do
-            tool.call(arguments)
-          end
-          elapsed_ms = elapsed_since(start_time)
 
-          Result.new(
-            name: tool_name,
-            success: true,
-            value: value,
-            duration_ms: elapsed_ms
-          )
-        rescue Timeout::Error
-          elapsed_ms = elapsed_since(start_time)
+        # Container for the worker thread's result/error
+        value = nil
+        error = nil
+
+        worker = Thread.new do
+          begin
+            value = tool.call(arguments)
+          rescue StandardError => e
+            error = e
+          end
+        end
+
+        # Join with timeout — returns nil if the thread didn't finish in time
+        finished = worker.join(@timeout)
+
+        elapsed_ms = elapsed_since(start_time)
+
+        if finished.nil?
+          # Thread did not finish within the timeout. We cannot safely kill it
+          # (Thread#kill can corrupt state), so we leave it running and report
+          # the timeout. This matches the tradeoff documented for parallel mode.
           Result.new(
             name: tool_name,
             success: false,
             error: "Tool '#{tool_name}' timed out after #{@timeout}s",
             duration_ms: elapsed_ms
           )
-        rescue StandardError => e
-          elapsed_ms = elapsed_since(start_time)
+        elsif error
           Result.new(
             name: tool_name,
             success: false,
-            error: "#{e.class}: #{e.message}",
+            error: "#{error.class}: #{error.message}",
+            duration_ms: elapsed_ms
+          )
+        else
+          Result.new(
+            name: tool_name,
+            success: true,
+            value: value,
             duration_ms: elapsed_ms
           )
         end
@@ -160,6 +238,10 @@ module RubyPi
       #
       # @param start_time [Float] The start timestamp from Process.clock_gettime.
       # @return [Float] Elapsed time in milliseconds.
+      def elapsed_since(start_time)
+        (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000.0
+      end
+
       # Recursively converts all string keys in a hash to symbols so that
       # tool implementations can use idiomatic Ruby symbol-key access
       # (e.g. `args[:field]`) regardless of whether the LLM provider
@@ -178,10 +260,6 @@ module RubyPi
         else
           obj
         end
-      end
-
-      def elapsed_since(start_time)
-        (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000.0
       end
     end
   end

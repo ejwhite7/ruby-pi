@@ -75,7 +75,12 @@ module RubyPi
           # Authentication errors are not retryable — raise immediately
           raise
         rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError => e
-          if attempt < @max_retries
+          # Retry up to max_retries times AFTER the initial attempt.
+          # With max_retries: 3, attempt goes 1 (initial), 2, 3, 4 — the condition
+          # `attempt <= @max_retries` allows retries on attempts 1..3, so we get
+          # 3 retries + 1 initial = 4 total attempts. Previously used `< @max_retries`
+          # which was off-by-one (only 2 retries with max_retries: 3).
+          if attempt <= @max_retries
             delay = calculate_backoff(attempt)
             log_retry(attempt, delay, e)
             sleep(delay)
@@ -90,18 +95,18 @@ module RubyPi
       # Subclasses MUST override this method.
       #
       # @return [String] the model identifier
-      # @raise [RubyPi::NotImplementedError] if not overridden
+      # @raise [RubyPi::AbstractMethodError] if not overridden
       def model_name
-        raise RubyPi::NotImplementedError, :model_name
+        raise RubyPi::AbstractMethodError, :model_name
       end
 
       # Returns the provider identifier.
       # Subclasses MUST override this method.
       #
       # @return [Symbol] the provider identifier (e.g., :gemini, :anthropic, :openai)
-      # @raise [RubyPi::NotImplementedError] if not overridden
+      # @raise [RubyPi::AbstractMethodError] if not overridden
       def provider_name
-        raise RubyPi::NotImplementedError, :provider_name
+        raise RubyPi::AbstractMethodError, :provider_name
       end
 
       private
@@ -115,7 +120,7 @@ module RubyPi
       # @yield [event] optional block for streaming events
       # @return [RubyPi::LLM::Response]
       def perform_complete(messages:, tools:, stream:, &block)
-        raise RubyPi::NotImplementedError, :perform_complete
+        raise RubyPi::AbstractMethodError, :perform_complete
       end
 
       # Calculates the backoff delay for a given retry attempt using
@@ -145,7 +150,15 @@ module RubyPi
         )
       end
 
-      # Builds a Faraday connection with retry middleware and standard settings.
+      # Builds a Faraday connection with standard settings.
+      #
+      # Issue #20: Removed incorrect retry-middleware claim from the
+      # docstring. The faraday-retry gem was listed as a dependency but never
+      # wired into the connection builder. Since retry logic is already
+      # implemented in BaseProvider#complete with exponential backoff (see
+      # the begin/rescue/retry block), the Faraday-level retry middleware is
+      # not needed and would cause confusing double-retry behavior. The
+      # faraday-retry dependency has been removed from the gemspec.
       #
       # @param base_url [String] the base URL for the API
       # @param headers [Hash] default headers for all requests

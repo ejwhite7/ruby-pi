@@ -1,7 +1,7 @@
 # .github/workflows/ci.yml
 #
 # Continuous integration workflow for ruby-pi. Runs the RSpec test suite
-# against Ruby 3.2 and 3.3 on every push and pull request to main.
+# against Ruby 3.2, 3.3, and 3.4 on every push and pull request to main.
 
 name: CI
 
@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby-version: ["3.2", "3.3"]
+        ruby-version: ["3.2", "3.3", "3.4"]
 
     name: Ruby ${{ matrix.ruby-version }}
 

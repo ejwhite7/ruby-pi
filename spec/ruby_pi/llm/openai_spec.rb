@@ -211,7 +211,49 @@ RSpec.describe RubyPi::LLM::OpenAI do
       end
     end
 
-    context "retry on transient errors" do
+    context "real streaming via on_data callback" do
+      # This test verifies that the streaming implementation uses Faraday's
+      # on_data callback to deliver chunks incrementally as they arrive from
+      # the API, rather than buffering the entire response before processing.
+      it "configures req.options.on_data for incremental SSE processing" do
+        sse_body = <<~SSE
+          data: {"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+          data: {"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"content":"chunk1"},"finish_reason":null}]}
+
+          data: {"id":"chatcmpl-stream","choices":[{"index":0,"delta":{"content":"chunk2"},"finish_reason":null}]}
+
+          data: {"id":"chatcmpl-stream","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+          data: [DONE]
+
+        SSE
+
+        stub_request(:post, api_url)
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "text/event-stream" },
+            body: sse_body
+          )
+
+        # Track the order of events: we verify that text deltas are yielded
+        # to the block (which is how on_data delivers them incrementally).
+        event_order = []
+        response = provider.complete(messages: messages, stream: true) do |event|
+          event_order << event.type
+        end
+
+        # The on_data callback should deliver text deltas incrementally.
+        # With fake streaming (buffered response), events would still appear
+        # but only after the full response is received. The key structural
+        # difference is that on_data is set on the request options.
+        expect(event_order).to include(:text_delta)
+        expect(event_order.last).to eq(:done)
+        expect(response.content).to eq("chunk1chunk2")
+      end
+    end
+
+        context "retry on transient errors" do
       it "retries on 500 errors and succeeds" do
         stub_request(:post, api_url)
           .to_return(

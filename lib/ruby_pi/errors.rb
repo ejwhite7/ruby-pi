@@ -88,10 +88,28 @@ module RubyPi
 
   # Raised when a subclass does not implement a required abstract method
   # from a base class.
-  class NotImplementedError < Error
+  #
+  # Issue #14: Renamed from NotImplementedError to AbstractMethodError to
+  # avoid shadowing Ruby's stdlib NotImplementedError < ScriptError. The
+  # stdlib class is raised by Kernel#fork on platforms that don't support it,
+  # and shadowing it can cause confusing rescue behavior.
+  class AbstractMethodError < Error
     # @param method_name [String, Symbol] the name of the unimplemented method
     def initialize(method_name = nil)
       super(method_name ? "Subclass must implement ##{method_name}" : "Subclass must implement this method")
+    end
+  end
+
+  # Raised when the LLM returns tool calls but no tools are registered
+  # with the agent. This typically means the model hallucinated a tool
+  # invocation that cannot be fulfilled.
+  #
+  # Issue #17: Provides a clear typed error instead of a NoMethodError
+  # when nil.find is called on a nil tools registry.
+  class NoToolsRegisteredError < Error
+    # @param message [String] human-readable error description
+    def initialize(message = nil)
+      super(message || "Model returned tool calls but no tools are registered")
     end
   end
 end

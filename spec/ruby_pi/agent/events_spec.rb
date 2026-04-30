@@ -4,7 +4,7 @@
 #
 # Tests for RubyPi::Agent::Events — verifies the EVENTS constant and the
 # EventEmitter mixin's on/emit/off behavior, including multiple handlers,
-# error isolation, and unknown event guards.
+# error isolation, recursion guard, and unknown event guards.
 
 require_relative "../../../lib/ruby_pi/agent/events"
 
@@ -20,6 +20,7 @@ RSpec.describe RubyPi::Agent::EventEmitter do
     it "defines all expected event types" do
       expected = %i[
         text_delta
+        tool_call_delta
         tool_execution_start
         tool_execution_end
         turn_start
@@ -54,6 +55,12 @@ RSpec.describe RubyPi::Agent::EventEmitter do
       emitter.on(:text_delta) { results << :second }
       emitter.emit(:text_delta)
       expect(results).to eq([:first, :second])
+    end
+
+    it "accepts :tool_call_delta as a valid event" do
+      expect {
+        emitter.on(:tool_call_delta) { |_| "ok" }
+      }.not_to raise_error
     end
   end
 
@@ -105,9 +112,19 @@ RSpec.describe RubyPi::Agent::EventEmitter do
     end
 
     it "does not infinitely recurse when an :error handler raises" do
+      # This tests the recursion guard: errors raised inside :error handlers
+      # are silently swallowed to prevent unbounded recursion. Without the
+      # guard, emit(:error) -> handler raises -> emit(:error) -> ... would
+      # cause a stack overflow.
       emitter.on(:error) { raise "error handler also fails" }
-      # Should not raise — error in :error handler is silently rescued
       expect { emitter.emit(:error, error: RuntimeError.new("test")) }.not_to raise_error
+    end
+
+    it "emits :tool_call_delta events" do
+      received = nil
+      emitter.on(:tool_call_delta) { |data| received = data }
+      emitter.emit(:tool_call_delta, data: { name: "search", partial_args: "{\"q\":" })
+      expect(received[:data][:name]).to eq("search")
     end
   end
 
