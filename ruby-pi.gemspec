@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.name          = "ruby-pi"
   spec.version       = RubyPi::VERSION
   spec.authors       = ["RubyPi Contributors"]
-  spec.email         = ["ruby-pi@example.com"]
+  spec.email         = ["ejwhite7@users.noreply.github.com"]
 
   spec.summary       = "AI agent harness for Ruby — build LLM agents with tool calling, " \
                        "streaming, and a unified interface to OpenAI, Anthropic Claude, and Google Gemini."
@@ -27,6 +27,8 @@ Gem::Specification.new do |spec|
   spec.homepage      = "https://github.com/ejwhite7/ruby-pi"
   spec.license       = "MIT"
 
+  # Supported and tested Ruby versions: 3.2, 3.3, 3.4
+  # CI matrix (.github/workflows/ci.yml) runs against all supported versions.
   spec.required_ruby_version = ">= 3.2.0"
 
   spec.metadata["homepage_uri"]    = spec.homepage
@@ -43,9 +45,8 @@ Gem::Specification.new do |spec|
   # Runtime dependencies
   spec.add_dependency "faraday",          "~> 2.0"
   spec.add_dependency "faraday-retry",    "~> 2.0"
-  spec.add_dependency "faraday-net_http", ">= 3.0", "< 3.4"
+  spec.add_dependency "faraday-net_http", ">= 3.0"
   spec.add_dependency "concurrent-ruby",  "~> 1.2"
-  spec.add_dependency "ostruct",          "~> 0.6"
 
   # Development dependencies
   spec.add_development_dependency "rspec",   "~> 3.12"
