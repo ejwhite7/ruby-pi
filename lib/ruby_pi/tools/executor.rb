@@ -109,7 +109,7 @@ module RubyPi
       # @return [RubyPi::Tools::Result] The execution result.
       def execute_single(call)
         tool_name = (call[:name] || call["name"]).to_s
-        arguments = call[:arguments] || call["arguments"] || {}
+        arguments = deep_symbolize_keys(call[:arguments] || call["arguments"] || {})
 
         tool = @registry.find(tool_name)
 
@@ -160,6 +160,26 @@ module RubyPi
       #
       # @param start_time [Float] The start timestamp from Process.clock_gettime.
       # @return [Float] Elapsed time in milliseconds.
+      # Recursively converts all string keys in a hash to symbols so that
+      # tool implementations can use idiomatic Ruby symbol-key access
+      # (e.g. `args[:field]`) regardless of whether the LLM provider
+      # returned string-keyed JSON.
+      #
+      # @param obj [Object] the object to transform (Hash, Array, or scalar)
+      # @return [Object] the transformed object with symbolized keys
+      def deep_symbolize_keys(obj)
+        case obj
+        when Hash
+          obj.each_with_object({}) do |(key, value), result|
+            result[key.to_sym] = deep_symbolize_keys(value)
+          end
+        when Array
+          obj.map { |item| deep_symbolize_keys(item) }
+        else
+          obj
+        end
+      end
+
       def elapsed_since(start_time)
         (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000.0
       end

@@ -77,9 +77,32 @@ module RubyPi
       # @param tools [Array<Hash>] tool definitions
       # @return [Hash] the request body
       def build_request_body(messages, tools)
+        # Separate system messages from conversation messages. Gemini requires
+        # system instructions via a dedicated `systemInstruction` field — they
+        # cannot appear as entries in `contents`. The Loop prepends a
+        # { role: :system } message; we extract it here.
+        system_parts = []
+        conversation_messages = []
+
+        messages.each do |msg|
+          role = (msg[:role] || msg["role"]).to_s
+          if role == "system"
+            system_parts << (msg[:content] || msg["content"]).to_s
+          else
+            conversation_messages << msg
+          end
+        end
+
         body = {
-          contents: messages.map { |msg| format_message(msg) }
+          contents: conversation_messages.map { |msg| format_message(msg) }
         }
+
+        # Inject system instruction when system messages are present
+        unless system_parts.empty?
+          body[:systemInstruction] = {
+            parts: system_parts.map { |text| { text: text } }
+          }
+        end
 
         unless tools.empty?
           body[:tools] = [{
@@ -98,8 +121,31 @@ module RubyPi
         role = message[:role]&.to_s || message["role"]&.to_s || "user"
         content = message[:content] || message["content"] || ""
 
-        # Gemini uses "user" and "model" roles
-        gemini_role = role == "assistant" ? "model" : role
+        # Gemini uses "user" and "model" roles. Map tool results to "user"
+        # role with a functionResponse part when we have the metadata, or
+        # plain text otherwise. System messages should have been extracted
+        # by build_request_body before reaching this method.
+        gemini_role = case role
+                      when "assistant" then "model"
+                      when "tool"      then "user"
+                      else                  role
+                      end
+
+        # Tool-role messages carry function call results. When tool_call_id
+        # and name are present, send as a Gemini functionResponse so the
+        # model can correlate the result with its earlier functionCall.
+        tool_name = message[:name] || message["name"]
+        if role == "tool" && tool_name
+          return {
+            role: "user",
+            parts: [{
+              functionResponse: {
+                name: tool_name.to_s,
+                response: { result: content.to_s }
+              }
+            }]
+          }
+        end
 
         {
           role: gemini_role,

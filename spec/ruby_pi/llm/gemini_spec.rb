@@ -194,4 +194,93 @@ RSpec.describe RubyPi::LLM::Gemini do
       end
     end
   end
+
+    context "system message handling" do
+      let(:system_messages) do
+        [
+          { role: :system, content: "You are a helpful assistant." },
+          { role: "user", content: "Hello!" }
+        ]
+      end
+
+      before do
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "application/json" },
+            body: JSON.generate({
+              candidates: [{
+                content: { parts: [{ text: "Hi there!" }], role: "model" },
+                finishReason: "STOP"
+              }],
+              usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 }
+            })
+          )
+      end
+
+      it "sends system messages as systemInstruction, not in contents" do
+        provider.complete(messages: system_messages)
+
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .with { |req|
+            body = JSON.parse(req.body)
+            # systemInstruction should be present
+            body.key?("systemInstruction") &&
+              body["systemInstruction"]["parts"].first["text"] == "You are a helpful assistant." &&
+              # contents should only have the user message, not the system message
+              body["contents"].length == 1 &&
+              body["contents"].first["role"] == "user"
+          }
+      end
+
+      it "omits systemInstruction when no system messages are present" do
+        provider.complete(messages: [{ role: "user", content: "Hello!" }])
+
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .with { |req|
+            body = JSON.parse(req.body)
+            !body.key?("systemInstruction")
+          }
+      end
+    end
+
+    context "tool result message formatting" do
+      let(:tool_messages) do
+        [
+          { role: "user", content: "What's the weather?" },
+          { role: "assistant", content: "" },
+          { role: :tool, content: '{"temp": 72}', name: "get_weather", tool_call_id: "gemini_0" }
+        ]
+      end
+
+      before do
+        stub_request(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .to_return(
+            status: 200,
+            headers: { "Content-Type" => "application/json" },
+            body: JSON.generate({
+              candidates: [{
+                content: { parts: [{ text: "It's 72 degrees." }], role: "model" },
+                finishReason: "STOP"
+              }],
+              usageMetadata: { promptTokenCount: 15, candidatesTokenCount: 5, totalTokenCount: 20 }
+            })
+          )
+      end
+
+      it "formats tool messages as functionResponse with user role" do
+        provider.complete(messages: tool_messages)
+
+        expect(WebMock).to have_requested(:post, "#{base_url}:generateContent?key=test-gemini-key")
+          .with { |req|
+            body = JSON.parse(req.body)
+            tool_msg = body["contents"].find { |c|
+              c["parts"]&.any? { |p| p.key?("functionResponse") }
+            }
+            tool_msg &&
+              tool_msg["role"] == "user" &&
+              tool_msg["parts"].first["functionResponse"]["name"] == "get_weather"
+          }
+      end
+    end
 end
