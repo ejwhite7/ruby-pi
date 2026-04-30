@@ -254,57 +254,85 @@ module RubyPi
         tool_call_accumulators = {}
         finish_reason = nil
 
+        # Buffer for incomplete SSE lines across on_data chunks. Faraday's
+        # on_data callback delivers raw bytes as they arrive from the network,
+        # which may split SSE events mid-line. We accumulate a line buffer and
+        # process complete lines incrementally so that deltas reach the caller
+        # as soon as each SSE event is fully received.
+        sse_buffer = +""
+
         response = conn.post("/v1/chat/completions") do |req|
           req.headers["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
-        end
 
-        handle_error_response(response) unless response.success?
+          # Use Faraday's on_data callback for real incremental streaming.
+          # Without this, Faraday buffers the entire response body before
+          # returning — no deltas reach the caller until the model finishes
+          # generating (fake streaming).
+          req.options.on_data = proc do |chunk, _overall_received_bytes, _env|
+            sse_buffer << chunk
+            # Process all complete lines in the buffer
+            while (line_end = sse_buffer.index("\n"))
+              line = sse_buffer.slice!(0, line_end + 1).strip
+              next if line.empty?
+              next unless line.start_with?("data: ")
 
-        # Parse SSE events from the response body
-        parse_sse_events(response.body) do |data|
-          choices = data["choices"] || []
-          choice = choices.first
-          next unless choice
+              data_str = line.sub(/\Adata: /, "")
+              next if data_str == "[DONE]"
 
-          delta = choice["delta"] || {}
-          finish_reason = choice["finish_reason"] if choice["finish_reason"]
-
-          # Handle text content deltas
-          if delta.key?("content") && delta["content"]
-            text = delta["content"]
-            accumulated_text << text
-            block.call(StreamEvent.new(type: :text_delta, data: text))
-          end
-
-          # Handle tool call deltas
-          if delta.key?("tool_calls")
-            delta["tool_calls"].each do |tc_delta|
-              index = tc_delta["index"] || 0
-
-              # Initialize accumulator for this tool call
-              tool_call_accumulators[index] ||= { id: nil, name: +"", arguments: +"" }
-              acc = tool_call_accumulators[index]
-
-              acc[:id] = tc_delta["id"] if tc_delta["id"]
-
-              if tc_delta.dig("function", "name")
-                acc[:name] << tc_delta["function"]["name"]
+              begin
+                data = JSON.parse(data_str)
+              rescue JSON::ParserError
+                next
               end
 
-              if tc_delta.dig("function", "arguments")
-                acc[:arguments] << tc_delta["function"]["arguments"]
+              # Process this SSE event
+              choices = data["choices"] || []
+              choice = choices.first
+              next unless choice
+
+              delta = choice["delta"] || {}
+              finish_reason = choice["finish_reason"] if choice["finish_reason"]
+
+              # Handle text content deltas
+              if delta.key?("content") && delta["content"]
+                text = delta["content"]
+                accumulated_text << text
+                block.call(StreamEvent.new(type: :text_delta, data: text))
               end
 
-              block.call(StreamEvent.new(type: :tool_call_delta, data: {
-                index: index,
-                id: acc[:id],
-                name: acc[:name],
-                arguments_fragment: tc_delta.dig("function", "arguments") || ""
-              }))
+              # Handle tool call deltas
+              if delta.key?("tool_calls")
+                delta["tool_calls"].each do |tc_delta|
+                  index = tc_delta["index"] || 0
+
+                  # Initialize accumulator for this tool call
+                  tool_call_accumulators[index] ||= { id: nil, name: +"", arguments: +"" }
+                  acc = tool_call_accumulators[index]
+
+                  acc[:id] = tc_delta["id"] if tc_delta["id"]
+
+                  if tc_delta.dig("function", "name")
+                    acc[:name] << tc_delta["function"]["name"]
+                  end
+
+                  if tc_delta.dig("function", "arguments")
+                    acc[:arguments] << tc_delta["function"]["arguments"]
+                  end
+
+                  block.call(StreamEvent.new(type: :tool_call_delta, data: {
+                    index: index,
+                    id: acc[:id],
+                    name: acc[:name],
+                    arguments_fragment: tc_delta.dig("function", "arguments") || ""
+                  }))
+                end
+              end
             end
           end
         end
+
+        handle_error_response(response) unless response.success?
 
         # Build final tool calls from accumulators
         tool_calls = tool_call_accumulators.sort_by { |k, _| k }.map do |_, acc|

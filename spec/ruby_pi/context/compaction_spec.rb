@@ -121,10 +121,13 @@ RSpec.describe RubyPi::Context::Compaction do
         expect(preserved[1][:content]).to eq("Final response")
       end
 
-      it "prepends a summary message" do
+      it "prepends a summary message with role :user (not :system)" do
         result = compaction.compact(messages, system_prompt)
         summary_msg = result.first
-        expect(summary_msg[:role]).to eq(:system)
+        # The summary message must use role :user, not :system, to prevent it from
+        # overwriting the actual system prompt in providers like Anthropic that extract
+        # system messages into a top-level parameter (last one wins).
+        expect(summary_msg[:role]).to eq(:user)
         expect(summary_msg[:content]).to include("Summary of earlier conversation.")
         expect(summary_msg[:content]).to include("[Conversation Summary]")
       end
@@ -187,6 +190,46 @@ RSpec.describe RubyPi::Context::Compaction do
         expect(emitted).not_to be_nil
         expect(emitted[:dropped_count]).to eq(2)
         expect(emitted[:summary]).to eq("Summary")
+      end
+    end
+
+    context "does not poison the system prompt for Anthropic" do
+      let(:long_content) { "x" * 200 }
+      let(:messages) do
+        [
+          { role: :user, content: long_content },
+          { role: :assistant, content: long_content },
+          { role: :user, content: long_content },
+          { role: :assistant, content: "Final response" }
+        ]
+      end
+
+      before do
+        allow(summary_model).to receive(:complete).and_return(
+          RubyPi::LLM::Response.new(
+            content: "Summary of conversation.",
+            tool_calls: [],
+            usage: {},
+            finish_reason: "stop"
+          )
+        )
+      end
+
+      it "does not include any :system role messages in compacted output" do
+        result = compaction.compact(messages, "Be helpful")
+        system_messages = result.select { |m| m[:role] == :system }
+        # The compacted output should contain zero :system messages; the real system
+        # prompt is prepended separately by the Loop, not by compaction.
+        expect(system_messages).to be_empty
+      end
+
+      it "ensures only one :system message when loop prepends the real prompt" do
+        result = compaction.compact(messages, "Be helpful")
+        # Simulate what Loop#build_llm_messages does: prepend the real system prompt
+        full_messages = [{ role: :system, content: "Be helpful" }] + result
+        system_messages = full_messages.select { |m| m[:role] == :system }
+        expect(system_messages.size).to eq(1)
+        expect(system_messages.first[:content]).to eq("Be helpful")
       end
     end
   end

@@ -127,5 +127,55 @@ RSpec.describe RubyPi::LLM::Fallback do
         expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
       end
     end
+
+    context "retry count is not multiplied (no outer retry loop)" do
+      # Issue #7: Without the fix, Fallback inherits BaseProvider's retry loop,
+      # causing retries to compose: outer_retries x (primary_retries + fallback_retries).
+      # The fix overrides #complete to skip the outer retry wrapper.
+
+      it "makes only primary_retries + fallback_retries total requests (not multiplied)" do
+        # With max_retries: 3, each provider makes 4 attempts (1 + 3 retries).
+        # Total should be 4 (primary) + 4 (fallback) = 8, NOT 4 x 8 = 32.
+
+        stub_request(:post, gemini_url)
+          .to_return(status: 500, body: "Primary down")
+
+        stub_request(:post, openai_url)
+          .to_return(status: 500, body: "Fallback also down")
+
+        expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
+
+        # Primary: 4 attempts (1 initial + 3 retries with max_retries=3)
+        expect(WebMock).to have_requested(:post, gemini_url).times(4)
+        # Fallback: 4 attempts (1 initial + 3 retries with max_retries=3)
+        expect(WebMock).to have_requested(:post, openai_url).times(4)
+      end
+
+      it "does not retry the primary+fallback cycle from the outside" do
+        # If the outer retry were active, we'd see the primary called again
+        # after the fallback fails. With the fix, each is called exactly once
+        # (with their own internal retries).
+        primary_calls = 0
+        fallback_calls = 0
+
+        stub_request(:post, gemini_url)
+          .to_return { |_req|
+            primary_calls += 1
+            { status: 500, body: "Primary down" }
+          }
+
+        stub_request(:post, openai_url)
+          .to_return { |_req|
+            fallback_calls += 1
+            { status: 500, body: "Fallback down" }
+          }
+
+        expect { provider.complete(messages: messages) }.to raise_error(RubyPi::ApiError)
+
+        # Each provider retries internally: 4 attempts each (1 + 3 retries)
+        expect(primary_calls).to eq(4)
+        expect(fallback_calls).to eq(4)
+      end
+    end
   end
 end

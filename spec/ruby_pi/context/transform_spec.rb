@@ -3,7 +3,8 @@
 # spec/ruby_pi/context/transform_spec.rb
 #
 # Tests for RubyPi::Context::Transform — verifies compose, inject_datetime,
-# inject_user_preferences, and inject_workspace_context helpers.
+# inject_user_preferences, and inject_workspace_context helpers, including
+# idempotency (Issue #8: injections must not accumulate across iterations).
 
 require_relative "../../../lib/ruby_pi/agent/state"
 require_relative "../../../lib/ruby_pi/context/transform"
@@ -45,6 +46,25 @@ RSpec.describe RubyPi::Context::Transform do
       # Match pattern like "2025-01-15 14:30:00 UTC"
       expect(state.system_prompt).to match(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/)
     end
+
+    it "is idempotent — does not accumulate timestamps across multiple calls" do
+      # Issue #8: Without the fix, calling inject_datetime N times would
+      # append N timestamps, bloating the context window.
+      transform = described_class.inject_datetime
+
+      5.times { transform.call(state) }
+
+      # Count occurrences of "Current date and time:" — should be exactly 1
+      occurrences = state.system_prompt.scan("Current date and time:").length
+      expect(occurrences).to eq(1)
+    end
+
+    it "preserves the base system prompt after multiple calls" do
+      transform = described_class.inject_datetime
+      3.times { transform.call(state) }
+
+      expect(state.system_prompt).to start_with("You are a test assistant.")
+    end
   end
 
   describe ".inject_user_preferences" do
@@ -72,6 +92,27 @@ RSpec.describe RubyPi::Context::Transform do
       expect(state.system_prompt).to include("[User Preferences]")
       expect(state.system_prompt).to include("Prefer short answers")
     end
+
+    it "is idempotent — does not accumulate preferences across multiple calls" do
+      # Issue #8: Without the fix, calling inject_user_preferences N times
+      # would append N preference blocks.
+      transform = described_class.inject_user_preferences { |s| s.user_data[:prefs] }
+
+      5.times { transform.call(state) }
+
+      occurrences = state.system_prompt.scan("[User Preferences]").length
+      expect(occurrences).to eq(1)
+    end
+
+    it "strips old preferences when block returns nil on subsequent call" do
+      transform_with_prefs = described_class.inject_user_preferences { |s| s.user_data[:prefs] }
+      transform_with_prefs.call(state)
+      expect(state.system_prompt).to include("[User Preferences]")
+
+      transform_nil = described_class.inject_user_preferences { |_s| nil }
+      transform_nil.call(state)
+      expect(state.system_prompt).not_to include("[User Preferences]")
+    end
   end
 
   describe ".inject_workspace_context" do
@@ -98,6 +139,17 @@ RSpec.describe RubyPi::Context::Transform do
 
       expect(state.system_prompt).to include("[Workspace Context]")
       expect(state.system_prompt).to include("Project: Alpha")
+    end
+
+    it "is idempotent — does not accumulate workspace context across multiple calls" do
+      # Issue #8: Without the fix, calling inject_workspace_context N times
+      # would append N workspace blocks, bloating until context window blows.
+      transform = described_class.inject_workspace_context { |s| s.user_data[:workspace] }
+
+      5.times { transform.call(state) }
+
+      occurrences = state.system_prompt.scan("[Workspace Context]").length
+      expect(occurrences).to eq(1)
     end
   end
 
@@ -137,6 +189,24 @@ RSpec.describe RubyPi::Context::Transform do
       composed.call(state)
 
       expect(order).to eq([:first, :second, :third])
+    end
+
+    it "is idempotent when composed transforms are called multiple times" do
+      # Issue #8: A composed transform called N times should not accumulate
+      # N copies of each injection.
+      t1 = described_class.inject_datetime
+      t2 = described_class.inject_user_preferences { |s| s.user_data[:prefs] }
+      t3 = described_class.inject_workspace_context { |s| s.user_data[:workspace] }
+
+      composed = described_class.compose(t1, t2, t3)
+
+      # Simulate 10 loop iterations
+      10.times { composed.call(state) }
+
+      expect(state.system_prompt.scan("Current date and time:").length).to eq(1)
+      expect(state.system_prompt.scan("[User Preferences]").length).to eq(1)
+      expect(state.system_prompt.scan("[Workspace Context]").length).to eq(1)
+      expect(state.system_prompt).to start_with("You are a test assistant.")
     end
   end
 end
