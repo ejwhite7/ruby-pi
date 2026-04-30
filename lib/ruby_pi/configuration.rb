@@ -5,6 +5,10 @@
 # Global configuration for the RubyPi framework. Provides a centralized place
 # to set API keys, retry behavior, timeouts, and default model preferences.
 # Configure via RubyPi.configure { |c| c.gemini_api_key = "..." }.
+#
+# Supports both global (singleton) and per-agent configuration. Pass a
+# Configuration instance to Agent::Core via the `config:` kwarg to override
+# the global defaults for that agent.
 
 module RubyPi
   # Holds all configurable settings for the RubyPi framework.
@@ -17,6 +21,11 @@ module RubyPi
   #     config.max_retries      = 5
   #     config.retry_base_delay = 2.0
   #   end
+  #
+  # @example Per-agent configuration override
+  #   custom_config = RubyPi::Configuration.new
+  #   custom_config.openai_api_key = "per-agent-key"
+  #   agent = RubyPi::Agent.new(system_prompt: "...", model: model, config: custom_config)
   class Configuration
     # @return [String, nil] API key for Google Gemini
     attr_accessor :gemini_api_key
@@ -56,6 +65,25 @@ module RubyPi
 
     # Initializes a new Configuration with sensible defaults.
     def initialize
+      set_defaults
+    end
+
+    # Resets all configuration options to their default values.
+    # Uses the shared set_defaults method to avoid calling initialize directly.
+    #
+    # @return [void]
+    def reset!
+      set_defaults
+    end
+
+    private
+
+    # Sets all configuration ivars to their default values. Called by both
+    # initialize and reset! to ensure consistent defaults without the
+    # anti-pattern of calling initialize from reset!.
+    #
+    # @return [void]
+    def set_defaults
       @gemini_api_key        = nil
       @anthropic_api_key     = nil
       @openai_api_key        = nil
@@ -68,13 +96,6 @@ module RubyPi
       @default_anthropic_model = "claude-sonnet-4-20250514"
       @default_openai_model  = "gpt-4o"
       @logger                = nil
-    end
-
-    # Resets all configuration options to their default values.
-    #
-    # @return [void]
-    def reset!
-      initialize
     end
   end
 end
