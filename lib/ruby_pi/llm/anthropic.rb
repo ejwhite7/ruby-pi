@@ -247,8 +247,12 @@ module RubyPi
           end
         end
 
-        # If no content blocks were generated (edge case), add an empty text
-        # block to satisfy Anthropic's requirement for non-empty content.
+        # Anthropic requires every assistant message to have at least one
+        # content block. When an assistant turn contains only tool_use calls
+        # with no accompanying text (common in multi-tool responses), the
+        # content_blocks array may be empty after processing. Adding an empty
+        # text block satisfies the API's non-empty content constraint without
+        # altering the semantic content of the message.
         content_blocks << { type: "text", text: "" } if content_blocks.empty?
 
         { role: "assistant", content: content_blocks }
