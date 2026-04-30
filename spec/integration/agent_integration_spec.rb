@@ -378,7 +378,10 @@ RSpec.describe "Agent Integration", :integration do
 
     expect(result.content).to eq("Compacted response.")
     # After compaction we should have a summary message + preserved + new user + assistant
-    summary_msg = result.messages.find { |m| m[:role] == :system && m[:content].to_s.include?("Conversation Summary") }
+    # Compaction summary now uses role :user (not :system) to avoid poisoning
+    # the system prompt on providers like Anthropic that extract the last :system
+    # message as the top-level system parameter.
+    summary_msg = result.messages.find { |m| m[:role] == :user && m[:content].to_s.include?("Conversation Summary") }
     expect(summary_msg).not_to be_nil
   end
 
