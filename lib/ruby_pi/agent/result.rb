@@ -69,6 +69,8 @@ module RubyPi
       end
 
       # Returns a hash representation of the result for serialization.
+      # Includes both the error class name and message for full diagnostic
+      # context when an error is present.
       #
       # @return [Hash]
       def to_h
@@ -78,7 +80,7 @@ module RubyPi
           tool_calls_made: @tool_calls_made,
           usage: @usage,
           turns: @turns,
-          error: @error&.message,
+          error: @error ? { class: @error.class.name, message: @error.message } : nil,
           success: success?
         }
       end

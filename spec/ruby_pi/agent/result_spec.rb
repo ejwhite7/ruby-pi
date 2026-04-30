@@ -3,7 +3,8 @@
 # spec/ruby_pi/agent/result_spec.rb
 #
 # Tests for RubyPi::Agent::Result — verifies the immutable value object,
-# success? predicate, to_h serialization, and inspect output.
+# success? predicate, to_h serialization (including error class preservation),
+# and inspect output.
 
 require_relative "../../../lib/ruby_pi/agent/result"
 
@@ -130,11 +131,21 @@ RSpec.describe RubyPi::Agent::Result do
       expect(hash[:error]).to be_nil
     end
 
-    it "serializes error message when present" do
+    it "serializes error with class name and message when present" do
       result = described_class.new(error: RuntimeError.new("fail"))
       hash = result.to_h
-      expect(hash[:error]).to eq("fail")
+      expect(hash[:error]).to eq({ class: "RuntimeError", message: "fail" })
       expect(hash[:success]).to be false
+    end
+
+    it "preserves custom error class names" do
+      custom_error = Class.new(StandardError)
+      # Give the class a name by assigning to a constant equivalent
+      stub_const("CustomAgentError", custom_error)
+      result = described_class.new(error: CustomAgentError.new("custom fail"))
+      hash = result.to_h
+      expect(hash[:error][:class]).to eq("CustomAgentError")
+      expect(hash[:error][:message]).to eq("custom fail")
     end
   end
 
