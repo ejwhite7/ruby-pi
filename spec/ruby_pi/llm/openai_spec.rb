@@ -382,13 +382,27 @@ RSpec.describe RubyPi::LLM::OpenAI do
     end
 
     context "nil tool_call_id handling" do
-      it "uses 'unknown' for nil tool_call_id" do
+      it "raises ProviderError for nil tool_call_id" do
         messages = [
           { role: :tool, content: "result", tool_call_id: nil, name: "func" }
         ]
 
-        body = provider.send(:build_request_body, messages, [], false)
-        expect(body[:messages][0][:tool_call_id]).to eq("unknown")
+        # OpenAI now fails fast on missing tool_call_id (same pattern as
+        # Anthropic) instead of silently sending "unknown", which would cause
+        # an opaque HTTP 400 from the API.
+        expect {
+          provider.send(:build_request_body, messages, [], false)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool_call_id/)
+      end
+
+      it "raises ProviderError for blank tool_call_id" do
+        messages = [
+          { role: :tool, content: "result", tool_call_id: "  ", name: "func" }
+        ]
+
+        expect {
+          provider.send(:build_request_body, messages, [], false)
+        }.to raise_error(RubyPi::ProviderError, /Missing tool_call_id/)
       end
     end
 

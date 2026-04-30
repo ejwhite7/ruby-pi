@@ -245,11 +245,14 @@ module RubyPi
       # Recursively converts all string keys in a hash to symbols so that
       # tool implementations can use idiomatic Ruby symbol-key access
       # (e.g. `args[:field]`) regardless of whether the LLM provider
-      # returned string-keyed JSON.
+      # returned string-keyed JSON. Exposed as a class method so the agent
+      # loop can apply the same transformation to tool_call arguments
+      # before recording them in `tool_calls_made`, keeping the agent's
+      # observable arguments shape consistent with what tool blocks see.
       #
       # @param obj [Object] the object to transform (Hash, Array, or scalar)
       # @return [Object] the transformed object with symbolized keys
-      def deep_symbolize_keys(obj)
+      def self.deep_symbolize_keys(obj)
         case obj
         when Hash
           obj.each_with_object({}) do |(key, value), result|
@@ -260,6 +263,14 @@ module RubyPi
         else
           obj
         end
+      end
+
+      # Instance-method delegate so existing internal callers keep working.
+      #
+      # @param obj [Object] the object to transform (Hash, Array, or scalar)
+      # @return [Object] the transformed object with symbolized keys
+      def deep_symbolize_keys(obj)
+        self.class.deep_symbolize_keys(obj)
       end
     end
   end

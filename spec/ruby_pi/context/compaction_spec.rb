@@ -121,15 +121,69 @@ RSpec.describe RubyPi::Context::Compaction do
         expect(preserved[1][:content]).to eq("Final response")
       end
 
-      it "prepends a summary message with role :user (not :system)" do
+      it "prepends a summary message with role :assistant (not :system or :user)" do
         result = compaction.compact(messages, system_prompt)
         summary_msg = result.first
-        # The summary message must use role :user, not :system, to prevent it from
-        # overwriting the actual system prompt in providers like Anthropic that extract
-        # system messages into a top-level parameter (last one wins).
-        expect(summary_msg[:role]).to eq(:user)
+        # The summary message must use role :assistant to:
+        # 1. Prevent overwriting the actual system prompt in providers like Anthropic
+        #    that extract system messages into a top-level parameter (last one wins).
+        # 2. Avoid consecutive user messages, which Anthropic's API rejects (it
+        #    requires strict user/assistant alternation).
+        # An assistant summarizing prior conversation is also semantically correct.
+        expect(summary_msg[:role]).to eq(:assistant)
         expect(summary_msg[:content]).to include("Summary of earlier conversation.")
         expect(summary_msg[:content]).to include("[Conversation Summary]")
+      end
+
+      it "does not produce consecutive messages with the same role" do
+        result = compaction.compact(messages, system_prompt)
+        # Verify no two consecutive messages share the same role, which
+        # Anthropic's API would reject.
+        result.each_cons(2) do |a, b|
+          expect(a[:role]).not_to eq(b[:role]),
+            "Found consecutive #{a[:role]} messages: '#{a[:content][0..40]}...' and '#{b[:content][0..40]}...'"
+        end
+      end
+
+      it "uses :user summary role when first preserved message is :assistant" do
+        # When the preserved tail starts with :assistant, prepending an
+        # :assistant summary would create consecutive assistant messages
+        # (rejected by Anthropic). The summary role must therefore be :user.
+        # Construct a fixture where preserve_last_n=2 yields [assistant, user].
+        long = "x" * 200
+        msgs = [
+          { role: :user, content: long },
+          { role: :assistant, content: long },        # first preserved
+          { role: :user, content: long },
+          { role: :assistant, content: long },
+          { role: :assistant, content: "second-to-last" }, # preserved [0]
+          { role: :user, content: "last" }                  # preserved [1]
+        ]
+        result = compaction.compact(msgs, system_prompt)
+        expect(result.first[:role]).to eq(:user)
+        result.each_cons(2) do |a, b|
+          expect(a[:role]).not_to eq(b[:role])
+        end
+      end
+
+      it "uses :assistant summary role when first preserved message is :tool" do
+        # Tool-result messages also shouldn't be preceded by a same-role
+        # message. The summary should be :assistant in that case so the
+        # sequence is [assistant_summary, tool_result, ...].
+        long = "x" * 200
+        msgs = [
+          { role: :user, content: long },
+          { role: :assistant, content: long },
+          { role: :user, content: long },
+          { role: :assistant, content: long, tool_calls: [{ id: "t1", name: "x", arguments: {} }] },
+          { role: :tool, content: "tool result", tool_call_id: "t1", name: "x" }, # preserved [0]
+          { role: :assistant, content: "ack" }                                    # preserved [1]
+        ]
+        result = compaction.compact(msgs, system_prompt)
+        expect(result.first[:role]).to eq(:assistant)
+        result.each_cons(2) do |a, b|
+          expect(a[:role]).not_to eq(b[:role])
+        end
       end
 
       it "has fewer messages than the original" do

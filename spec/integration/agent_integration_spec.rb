@@ -377,12 +377,17 @@ RSpec.describe "Agent Integration", :integration do
     result = agent.run("Summarize everything")
 
     expect(result.content).to eq("Compacted response.")
-    # After compaction we should have a summary message + preserved + new user + assistant
-    # Compaction summary now uses role :user (not :system) to avoid poisoning
-    # the system prompt on providers like Anthropic that extract the last :system
-    # message as the top-level system parameter.
-    summary_msg = result.messages.find { |m| m[:role] == :user && m[:content].to_s.include?("Conversation Summary") }
+    # After compaction we should have a summary message + preserved + new user + assistant.
+    # The summary role must NOT be :system (that would poison the Anthropic
+    # system parameter) and must not duplicate the role of the first
+    # preserved message (Anthropic rejects consecutive same-role messages).
+    # Compaction picks :user or :assistant based on context, so we accept
+    # either here as long as the summary content is present and the role
+    # is not :system.
+    summary_msg = result.messages.find { |m| m[:content].to_s.include?("Conversation Summary") }
     expect(summary_msg).not_to be_nil
+    expect(summary_msg[:role]).not_to eq(:system)
+    expect(%i[user assistant]).to include(summary_msg[:role])
   end
 
   # -----------------------------------------------------------------------

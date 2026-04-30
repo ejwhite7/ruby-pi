@@ -22,6 +22,10 @@ module RubyPi
     # - :agent_end            — The agent has finished its run (final event).
     # - :error                — A recoverable or fatal error occurred.
     # - :compaction           — Context compaction was triggered.
+    # - :provider_fallback    — A Fallback provider switched from primary
+    #                           to backup mid-stream. Subscribers should
+    #                           discard any partial text_delta output that
+    #                           arrived before this event.
     EVENTS = %i[
       text_delta
       tool_call_delta
@@ -32,6 +36,7 @@ module RubyPi
       agent_end
       error
       compaction
+      provider_fallback
     ].freeze
 
     # Mixin that adds event subscription and emission to any class. Include

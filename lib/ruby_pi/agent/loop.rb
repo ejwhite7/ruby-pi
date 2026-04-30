@@ -162,6 +162,15 @@ module RubyPi
             # tool call data as it streams in (e.g. for progress indicators
             # or incremental JSON parsing).
             @emitter.emit(:tool_call_delta, data: event.data)
+          elsif event.fallback_start?
+            # The primary LLM provider failed mid-stream and a Fallback
+            # provider is now taking over. Discard the partial text we
+            # accumulated from the failed primary so the agent's recorded
+            # response reflects only the fallback's output, and surface a
+            # :provider_fallback event so subscribers can clear any UI
+            # state they rendered from the discarded primary deltas.
+            streamed_content.clear
+            @emitter.emit(:provider_fallback, **event.data)
           end
         end
 
@@ -199,15 +208,25 @@ module RubyPi
           timeout: @tool_timeout
         )
 
+        # Symbolize the JSON-parsed (string-keyed) tool_call arguments once,
+        # up front. Both the executor (which actually invokes the tool block)
+        # and the recorded `tool_calls_made` payload use this symbol-keyed
+        # form, keeping a single consistent shape across the pipeline rather
+        # than mixing string keys (raw from JSON) and symbol keys (post-
+        # symbolize) in different places.
+        symbolized = response.tool_calls.map do |tc|
+          RubyPi::Tools::Executor.deep_symbolize_keys(tc.arguments)
+        end
+
         # Prepare call hashes for the executor
-        calls = response.tool_calls.map do |tc|
-          { name: tc.name, arguments: tc.arguments }
+        calls = response.tool_calls.each_with_index.map do |tc, idx|
+          { name: tc.name, arguments: symbolized[idx] }
         end
 
         # Fire before_tool_call hooks and emit start events
-        response.tool_calls.each do |tc|
+        response.tool_calls.each_with_index do |tc, idx|
           @state.before_tool_call&.call(tc)
-          @emitter.emit(:tool_execution_start, tool_name: tc.name, arguments: tc.arguments)
+          @emitter.emit(:tool_execution_start, tool_name: tc.name, arguments: symbolized[idx])
         end
 
         # Execute all tool calls
@@ -224,15 +243,28 @@ module RubyPi
                         success: result.success?,
                         duration_ms: result.duration_ms)
 
-          # Record the tool call for the final result
+          # Record the tool call for the final result, using the symbolized
+          # arguments so callers see the same shape the tool itself received.
           @tool_calls_made << {
             tool_name: tc.name,
-            arguments: tc.arguments,
+            arguments: symbolized[idx],
             result: result.to_h
           }
 
-          # Add tool result to conversation as a tool-role message
-          result_content = result.success? ? JSON.generate(result.value) : "Error: #{result.error}"
+          # Add tool result to conversation as a tool-role message. Tools may
+          # return values containing types JSON cannot natively serialize
+          # (Time, Date, custom objects). JSON.generate would raise and abort
+          # the agent run, so fall back to a string representation in that
+          # case rather than crashing the loop.
+          result_content = if result.success?
+                             begin
+                               JSON.generate(result.value)
+                             rescue JSON::GeneratorError, TypeError
+                               result.value.to_s
+                             end
+                           else
+                             "Error: #{result.error}"
+                           end
           @state.add_message(
             role: :tool,
             content: result_content,

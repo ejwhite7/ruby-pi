@@ -28,6 +28,7 @@ RSpec.describe RubyPi::Agent::EventEmitter do
         agent_end
         error
         compaction
+        provider_fallback
       ]
       expect(RubyPi::Agent::EVENTS).to match_array(expected)
     end

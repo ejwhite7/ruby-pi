@@ -12,4 +12,4 @@ gemspec
 # Pin versions compatible with Ruby 3.3 without native extension compilation
 gem "bigdecimal", "3.1.5"
 gem "json", "2.7.2"
-gem "faraday-net_http", "~> 3.0", "< 3.4"
+gem "faraday-net_http", "~> 3.0"

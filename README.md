@@ -130,11 +130,23 @@ model.complete(messages: messages, stream: true) do |event|
     print event.data           # incremental text chunk
   when :tool_call_delta
     handle_fragment(event.data) # partial tool call JSON
+  when :fallback_start
+    # Only emitted by RubyPi::LLM::Fallback when the primary provider
+    # fails mid-stream. Discard any partial output rendered from the
+    # primary; the fallback provider is about to stream its full reply.
+    # Payload: { failed_provider:, error:, fallback_provider: }
+    clear_partial_output
   when :done
     puts "\nStream finished"
   end
 end
 ```
+
+When using `RubyPi::Agent`, the loop translates a `:fallback_start` stream
+event into an agent-level `:provider_fallback` event you can subscribe to
+with `agent.on(:provider_fallback) { |e| ... }`. The agent also discards
+any partial text it accumulated from the failed primary so the recorded
+response reflects only the fallback's output.
 
 #### Response & ToolCall
 
@@ -291,8 +303,8 @@ result2 = agent.continue("And in London?")
 Subscribe to lifecycle events for logging, monitoring, or custom behavior:
 
 ```ruby
-agent.on(:turn_start)          { |e| puts "Turn #{e[:iteration]} starting" }
-agent.on(:turn_end)            { |e| puts "Turn #{e[:iteration]} ended" }
+agent.on(:turn_start)          { |e| puts "Turn #{e[:turn]} starting" }
+agent.on(:turn_end)            { |e| puts "Turn #{e[:turn]} ended" }
 agent.on(:text_delta)          { |e| print e[:content] }
 agent.on(:tool_execution_start){ |e| puts "Calling #{e[:tool_name]}" }
 agent.on(:tool_execution_end)  { |e| puts "#{e[:tool_name]} => #{e[:result].value}" }
@@ -368,11 +380,11 @@ class MetricsExtension < RubyPi::Extensions::Base
 
   on_event :turn_end do |event|
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - @turn_timer
-    puts "Turn #{event[:iteration]} took #{elapsed.round(2)}s"
+    puts "Turn #{event[:turn]} took #{elapsed.round(2)}s"
   end
 
   on_event :agent_end do |event|
-    puts "Agent completed in #{event[:iterations]} iterations"
+    puts "Agent completed in #{event[:result].turns} turns"
   end
 end
 ```
