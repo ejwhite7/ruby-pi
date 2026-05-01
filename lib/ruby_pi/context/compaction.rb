@@ -75,10 +75,45 @@ module RubyPi
 
         # Split into messages to summarize and messages to keep
         preserved_count = [@preserve_last_n, messages.size].min
-        droppable = messages[0...(messages.size - preserved_count)]
-        preserved = messages[(messages.size - preserved_count)..]
+        droppable = messages[0...(messages.size - preserved_count)].dup
+        preserved = messages[(messages.size - preserved_count)..].dup
 
         # If there's nothing to drop, we can't compact further
+        return nil if droppable.empty?
+
+        # Anthropic and OpenAI both require every tool_result / tool message
+        # to reference a tool_use / tool_call from a preceding assistant
+        # message. If we summarize the assistant turn that originated a tool
+        # call but keep the matching tool_result, the API rejects the
+        # request with "tool_result without preceding tool_use".
+        #
+        # The boundary between droppable and preserved can split a tool
+        # exchange in two ways:
+        #   (a) preserved starts with one or more :tool messages whose
+        #       matching assistant turn is in droppable. Strip those
+        #       orphan tool messages from the head of preserved (move
+        #       them into droppable so they are summarized, not sent).
+        #   (b) the last droppable message is an :assistant with tool_calls,
+        #       but its matching :tool result(s) are in preserved. Pull
+        #       that assistant message back into preserved so the pair
+        #       stays intact.
+        #
+        # We apply (a) first: it's the common case (preserve_last_n=4 cuts
+        # mid-pair, leaving a stranded tool message). Then (b) catches the
+        # mirror case.
+        while preserved.first && preserved.first[:role] == :tool
+          droppable << preserved.shift
+        end
+
+        if droppable.last &&
+           droppable.last[:role] == :assistant &&
+           droppable.last[:tool_calls].is_a?(Array) &&
+           !droppable.last[:tool_calls].empty? &&
+           preserved.first && preserved.first[:role] == :tool
+          preserved.unshift(droppable.pop)
+        end
+
+        # After the boundary fix-ups, droppable may have become empty.
         return nil if droppable.empty?
 
         # Generate a summary of the dropped messages

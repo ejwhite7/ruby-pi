@@ -183,11 +183,31 @@ module RubyPi
             tc_name = tc[:name] || tc["name"]
             tc_args = tc[:arguments] || tc["arguments"] || {}
 
-            # OpenAI requires arguments as a JSON string
-            args_string = if tc_args.is_a?(String)
-                            tc_args
-                          elsif tc_args.is_a?(Hash)
+            # OpenAI requires arguments to be a JSON-encoded string. We
+            # validate up-front so a malformed string fails fast with a
+            # typed error here rather than as an opaque HTTP 400 from
+            # OpenAI. This mirrors Anthropic's input validation in
+            # build_assistant_message.
+            args_string = case tc_args
+                          when Hash
                             JSON.generate(tc_args)
+                          when String
+                            stripped = tc_args.strip
+                            if stripped.empty?
+                              "{}"
+                            else
+                              begin
+                                JSON.parse(tc_args)
+                                tc_args
+                              rescue JSON::ParserError => e
+                                raise RubyPi::ProviderError.new(
+                                  "Invalid JSON in assistant tool_call.arguments " \
+                                  "for tool '#{tc_name || "unknown"}': #{e.message} " \
+                                  "(raw: #{tc_args.inspect})",
+                                  provider: :openai
+                                )
+                              end
+                            end
                           else
                             "{}"
                           end
@@ -261,9 +281,11 @@ module RubyPi
           headers: default_headers
         )
 
-        response = conn.post("/v1/chat/completions") do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post("/v1/chat/completions") do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
+          end
         end
 
         handle_error_response(response) unless response.success?
@@ -300,11 +322,12 @@ module RubyPi
         response_status = nil
         error_body = +""
 
-        response = conn.post("/v1/chat/completions") do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post("/v1/chat/completions") do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
 
-          # Use Faraday's on_data callback for real incremental streaming.
+            # Use Faraday's on_data callback for real incremental streaming.
           # Without this, Faraday buffers the entire response body before
           # returning — no deltas reach the caller until the model finishes
           # generating (fake streaming).
@@ -389,7 +412,8 @@ module RubyPi
               end
             end
           end
-        end
+          end # conn.post
+        end # with_transport_errors
 
         # When on_data is active, the response body was consumed by the
         # callback. Pass the accumulated error_body so ApiError carries the

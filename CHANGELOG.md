@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-05-01
+
+### Fixed (adversarial review round 4)
+
+- **Faraday transport errors leaked untyped, bypassed retry (Critical)**: `BaseProvider#complete` rescued only `RubyPi::*` errors, but providers never wrapped Faraday network exceptions. A `Faraday::TimeoutError`, `Faraday::ConnectionFailed`, or `Faraday::SSLError` propagated as the raw Faraday class — breaking the documented error hierarchy and skipping the retry loop entirely (the exact case retries exist for). Added `BaseProvider#with_transport_errors` which translates `Faraday::TimeoutError` → `RubyPi::TimeoutError` and `Faraday::ConnectionFailed`/`SSLError`/other `Faraday::Error` → `RubyPi::ApiError`. Wrapped every `conn.post` call in all three providers (standard and streaming paths). `RubyPi::ProviderError` is now also retryable
+- **Gemini multi-turn tool use was broken (Critical)**: `Gemini#format_message` rendered assistant messages as text-only and silently dropped the `:tool_calls` field set by the agent loop. The next turn's `functionResponse` had no preceding `functionCall` to bind to, so Gemini rejected any conversation that included a tool call followed by a tool result. Assistant messages now emit one `functionCall` part per tool call (mirroring Anthropic's `tool_use` and OpenAI's `tool_calls` behavior). Empty text parts are also no longer emitted on tool-only assistant turns
+- **Compaction split tool_use/tool_result pairs (Critical)**: When `preserve_last_n` cut between an assistant `tool_calls` message (in droppable) and its matching `:tool` result (in preserved), Anthropic and OpenAI rejected the conversation with "tool_result without preceding tool_use". Compaction now strips orphan `:tool` messages from the head of preserved (moves them into droppable so they're summarized away). Mirror case where preserved starts with a tool result whose assistant is the last droppable message also handled
+- **`Tools::Executor` swallowed non-StandardError exceptions as nil success (Major)**: The worker thread rescued only `StandardError`. A tool block raising `Interrupt`, `SystemExit`, or any other `Exception` subclass left both `value` and `error` nil; the join then reported a *successful* `nil` result. Now rescues `Exception`, captures it as a failed `Result`. Worker thread also sets `report_on_exception = false` to avoid stderr spam
+- **Gemini tool_call IDs collided across turns (Major)**: IDs were generated as `"gemini_#{accumulated_tool_calls.length}"` — every response restarted numbering at 0, so a multi-turn conversation produced multiple tool calls all named `"gemini_0"`. Any caller using ID as a hash key (observability, result correlation) saw collisions. IDs now use `SecureRandom.hex(8)` for global uniqueness across both standard and streaming responses
+- **OpenAI passed malformed tool_call.arguments JSON verbatim (Minor)**: A non-JSON string in `tool_call.arguments` on an assistant message was forwarded unchanged to OpenAI, producing an opaque HTTP 400. Now validated up-front with `JSON.parse`; malformed input raises a typed `RubyPi::ProviderError` with the tool name and parse error before sending the request, matching Anthropic's input validation
+
 ## [0.1.5] - 2026-04-30
 
 ### Fixed (adversarial review round 3)

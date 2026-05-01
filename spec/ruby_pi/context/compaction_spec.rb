@@ -166,24 +166,56 @@ RSpec.describe RubyPi::Context::Compaction do
         end
       end
 
-      it "uses :assistant summary role when first preserved message is :tool" do
-        # Tool-result messages also shouldn't be preceded by a same-role
-        # message. The summary should be :assistant in that case so the
-        # sequence is [assistant_summary, tool_result, ...].
+      it "strips orphan tool messages from the head of preserved" do
+        # If preserved starts with a :tool whose matching assistant tool_calls
+        # is in droppable, sending that tool message would trigger Anthropic's
+        # "tool_result without preceding tool_use" error. Compaction must
+        # move the orphan tool message into droppable so it's summarized,
+        # not sent. The resulting preserved should not begin with :tool.
         long = "x" * 200
         msgs = [
           { role: :user, content: long },
           { role: :assistant, content: long },
           { role: :user, content: long },
           { role: :assistant, content: long, tool_calls: [{ id: "t1", name: "x", arguments: {} }] },
-          { role: :tool, content: "tool result", tool_call_id: "t1", name: "x" }, # preserved [0]
-          { role: :assistant, content: "ack" }                                    # preserved [1]
+          { role: :tool, content: "tool result", tool_call_id: "t1", name: "x" }, # would-be preserved [0]
+          { role: :assistant, content: "ack" }                                    # preserved
         ]
         result = compaction.compact(msgs, system_prompt)
-        expect(result.first[:role]).to eq(:assistant)
+
+        # No orphan :tool at the head of the post-compaction history.
+        expect(result.find { |m| m[:role] == :tool }).to be_nil
+
+        # Last preserved message survives as-is.
+        expect(result.last[:role]).to eq(:assistant)
+        expect(result.last[:content]).to eq("ack")
+
+        # Alternation invariant still holds.
         result.each_cons(2) do |a, b|
           expect(a[:role]).not_to eq(b[:role])
         end
+      end
+
+      it "pulls assistant-with-tool_calls back into preserved when preserved starts with its tool result" do
+        # Mirror case of the orphan-strip: if the boundary cuts BETWEEN an
+        # assistant tool_calls and its tool result(s), but the preserve_last_n
+        # window happened to keep the tool result, the fix-up logic should
+        # also handle assistant_with_tool_calls being the LAST droppable.
+        # In this fixture the orphan-strip path runs first; we just assert
+        # the final history has no orphaned tool messages.
+        long = "x" * 200
+        compaction = described_class.new(
+          max_tokens: 100,
+          summary_model: summary_model,
+          preserve_last_n: 1
+        )
+        msgs = [
+          { role: :user, content: long },
+          { role: :assistant, content: long, tool_calls: [{ id: "t1", name: "x", arguments: {} }] },
+          { role: :tool, content: "r", tool_call_id: "t1", name: "x" }
+        ]
+        result = compaction.compact(msgs, system_prompt)
+        expect(result.find { |m| m[:role] == :tool }).to be_nil
       end
 
       it "has fewer messages than the original" do

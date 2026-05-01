@@ -6,6 +6,8 @@
 # the Gemini REST API for both synchronous and streaming completions, including
 # tool/function calling support.
 
+require "securerandom"
+
 module RubyPi
   module LLM
     # Google Gemini provider implementation. Communicates with the Gemini
@@ -115,42 +117,114 @@ module RubyPi
 
       # Converts a normalized message hash to Gemini's content format.
       #
+      # Critically, an assistant message that carries `tool_calls` (set by
+      # the agent loop after a tool-using turn) must be rendered with one
+      # `functionCall` part per tool call. Without those parts, Gemini
+      # rejects any subsequent `functionResponse` on the next turn because
+      # the response has nothing to correlate against. Earlier versions
+      # dropped `tool_calls` here, breaking multi-turn tool use.
+      #
       # @param message [Hash] a message with :role and :content keys
       # @return [Hash] Gemini-formatted content object
       def format_message(message)
         role = message[:role]&.to_s || message["role"]&.to_s || "user"
-        content = message[:content] || message["content"] || ""
+        content = message[:content] || message["content"]
 
-        # Gemini uses "user" and "model" roles. Map tool results to "user"
-        # role with a functionResponse part when we have the metadata, or
-        # plain text otherwise. System messages should have been extracted
-        # by build_request_body before reaching this method.
-        gemini_role = case role
-                      when "assistant" then "model"
-                      when "tool"      then "user"
-                      else                  role
-                      end
-
-        # Tool-role messages carry function call results. When tool_call_id
-        # and name are present, send as a Gemini functionResponse so the
-        # model can correlate the result with its earlier functionCall.
+        # Tool-role messages carry function-call results. When the tool name
+        # is present, send as a Gemini functionResponse so the model can
+        # correlate the result with its earlier functionCall. System messages
+        # should have been extracted by build_request_body before reaching
+        # this method.
         tool_name = message[:name] || message["name"]
         if role == "tool" && tool_name
+          # Gemini's functionResponse expects a structured `response` object.
+          # Tool results are pre-serialized by the loop as either a JSON
+          # string (success) or an "Error: ..." string (failure). Try to
+          # parse JSON so the model receives structured data; fall back to
+          # wrapping the raw string under :result for plain-text content.
+          response_payload = parse_tool_response(content)
           return {
             role: "user",
             parts: [{
               functionResponse: {
                 name: tool_name.to_s,
-                response: { result: content.to_s }
+                response: response_payload
               }
             }]
           }
         end
 
+        # Assistant messages may carry `tool_calls` from a prior turn. Each
+        # one must be emitted as a `functionCall` part on the model turn so
+        # that the next turn's `functionResponse` has something to bind to.
+        if role == "assistant"
+          parts = []
+          text = content.to_s
+          parts << { text: text } unless text.empty?
+
+          tool_calls = message[:tool_calls] || message["tool_calls"]
+          if tool_calls.is_a?(Array)
+            tool_calls.each do |tc|
+              tc_name = (tc[:name] || tc["name"]).to_s
+              tc_args = tc[:arguments] || tc["arguments"] || {}
+              tc_args = parse_tool_arguments(tc_args)
+              parts << { functionCall: { name: tc_name, args: tc_args } }
+            end
+          end
+
+          # Gemini rejects an empty parts array on a model turn. If the
+          # assistant truly had no content and no tool_calls, fall back to
+          # an empty text part.
+          parts << { text: "" } if parts.empty?
+
+          return { role: "model", parts: parts }
+        end
+
         {
-          role: gemini_role,
+          role: role,
           parts: [{ text: content.to_s }]
         }
+      end
+
+      # Best-effort parse of a tool-result string into a structured object
+      # for Gemini's `functionResponse.response`. JSON content is returned
+      # as-is (wrapped in a hash if it parsed to a non-hash); non-JSON
+      # content (e.g., "Error: ...") is wrapped under :result.
+      #
+      # @param content [String, Hash, nil]
+      # @return [Hash]
+      def parse_tool_response(content)
+        return { result: "" } if content.nil?
+        return content if content.is_a?(Hash)
+
+        str = content.to_s
+        return { result: str } if str.strip.empty?
+
+        begin
+          parsed = JSON.parse(str)
+          parsed.is_a?(Hash) ? parsed : { result: parsed }
+        rescue JSON::ParserError
+          { result: str }
+        end
+      end
+
+      # Coerce a tool_call.arguments value (Hash, JSON string, or other)
+      # into a Hash suitable for Gemini's `functionCall.args`. Malformed
+      # or non-Hash values become an empty hash so the request is still
+      # well-formed.
+      #
+      # @param args [Hash, String, nil]
+      # @return [Hash]
+      def parse_tool_arguments(args)
+        return args if args.is_a?(Hash)
+        return {} unless args.is_a?(String) && !args.strip.empty?
+
+        begin
+          parsed = JSON.parse(args)
+          parsed.is_a?(Hash) ? parsed : {}
+        rescue JSON::ParserError
+          {}
+        end
       end
 
       # Converts a tool definition to Gemini's function declaration format.
@@ -198,9 +272,11 @@ module RubyPi
         conn = build_connection(base_url: BASE_URL, headers: default_headers)
         url = "/#{API_VERSION}/models/#{@model}:generateContent"
 
-        response = conn.post(url) do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post(url) do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
+          end
         end
 
         handle_error_response(response) unless response.success?
@@ -233,11 +309,12 @@ module RubyPi
         response_status = nil
         error_body = +""
 
-        response = conn.post(url) do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post(url) do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
 
-          # Use Faraday's on_data callback for real incremental streaming.
+            # Use Faraday's on_data callback for real incremental streaming.
           # Without this, Faraday buffers the entire response body before
           # returning — no deltas reach the caller until the model finishes
           # generating (fake streaming).
@@ -281,7 +358,12 @@ module RubyPi
                 elsif part.key?("functionCall")
                   fc = part["functionCall"]
                   tool_call = ToolCall.new(
-                    id: "gemini_#{accumulated_tool_calls.length}",
+                    # Generate a globally-unique ID per tool call. A simple
+                    # length-based counter ("gemini_0", "gemini_1") collides
+                    # across turns since each response restarts numbering at
+                    # 0, breaking any caller that uses ID as a hash key for
+                    # observability or result correlation.
+                    id: "gemini_#{SecureRandom.hex(8)}",
                     name: fc["name"],
                     arguments: fc["args"] || {}
                   )
@@ -308,7 +390,8 @@ module RubyPi
               end
             end
           end
-        end
+          end # conn.post
+        end # with_transport_errors
 
         # When on_data is active, the response body was consumed by the
         # callback. Pass the accumulated error_body so ApiError carries the
@@ -347,7 +430,9 @@ module RubyPi
           elsif part.key?("functionCall")
             fc = part["functionCall"]
             tool_calls << ToolCall.new(
-              id: "gemini_#{tool_calls.length}",
+              # See note in perform_streaming_request: per-response counters
+              # collide across turns, so we generate a globally-unique ID.
+              id: "gemini_#{SecureRandom.hex(8)}",
               name: fc["name"],
               arguments: fc["args"] || {}
             )

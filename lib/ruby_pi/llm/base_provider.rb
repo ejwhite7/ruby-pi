@@ -78,7 +78,7 @@ module RubyPi
         rescue RubyPi::AuthenticationError
           # Authentication errors are not retryable — raise immediately
           raise
-        rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError => e
+        rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError, RubyPi::ProviderError => e
           # Retry up to max_retries times AFTER the initial attempt.
           # With max_retries: 3, attempt goes 1 (initial), 2, 3, 4 — the condition
           # `attempt <= @max_retries` allows retries on attempts 1..3, so we get
@@ -176,6 +176,45 @@ module RubyPi
           conn.options.open_timeout = config.open_timeout
           conn.adapter :net_http
         end
+      end
+
+      # Wraps an HTTP block, translating Faraday transport-level exceptions
+      # (DNS failures, connection resets, TLS handshakes, read/write timeouts)
+      # into the RubyPi typed-error hierarchy so callers and the retry loop
+      # can rescue them uniformly.
+      #
+      # Without this wrapper, a `Faraday::TimeoutError` or
+      # `Faraday::ConnectionFailed` would propagate out of the provider as
+      # the raw Faraday class. That breaks two contracts:
+      #   1. The documented retry policy (BaseProvider#complete) only rescues
+      #      RubyPi errors, so transport failures would not be retried —
+      #      exactly the case retries exist for.
+      #   2. Callers `rescue RubyPi::TimeoutError` per the documented error
+      #      hierarchy and would not catch real network timeouts.
+      #
+      # @yield the HTTP call to wrap
+      # @return [Object] whatever the block returns
+      # @raise [RubyPi::TimeoutError] on Faraday::TimeoutError
+      # @raise [RubyPi::ApiError] on connection failures, SSL errors, or
+      #   any other Faraday::Error not otherwise classified
+      def with_transport_errors
+        yield
+      rescue Faraday::TimeoutError => e
+        raise RubyPi::TimeoutError, "#{provider_name} request timed out: #{e.message}"
+      rescue Faraday::ConnectionFailed, Faraday::SSLError => e
+        raise RubyPi::ApiError.new(
+          "#{provider_name} transport error: #{e.class}: #{e.message}",
+          status_code: nil,
+          response_body: nil
+        )
+      rescue Faraday::Error => e
+        # Catch-all for any other Faraday-level failure (parsing, adapter
+        # issues, etc.) so transport problems never leak provider internals.
+        raise RubyPi::ApiError.new(
+          "#{provider_name} HTTP client error: #{e.class}: #{e.message}",
+          status_code: nil,
+          response_body: nil
+        )
       end
 
       # Handles HTTP error responses by raising the appropriate RubyPi error.

@@ -195,9 +195,18 @@ module RubyPi
         error = nil
 
         worker = Thread.new do
+          # Don't spam stderr from the rescued worker thread.
+          Thread.current.report_on_exception = false
           begin
             value = tool.call(arguments)
-          rescue StandardError => e
+          rescue Exception => e # rubocop:disable Lint/RescueException
+            # Rescue the full Exception hierarchy (not just StandardError).
+            # If a tool block raises Interrupt, SystemExit, or any other
+            # non-StandardError, rescuing only StandardError leaves both
+            # `value` and `error` nil; the join then reports a successful
+            # nil result — a panic in a tool silently becomes "returned nil".
+            # Capture the failure here; the main thread surfaces it as a
+            # failed Result. The worker thread itself does not propagate.
             error = e
           end
         end

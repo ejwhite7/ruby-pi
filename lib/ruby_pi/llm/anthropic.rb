@@ -330,9 +330,11 @@ module RubyPi
           headers: default_headers
         )
 
-        response = conn.post("/v1/messages") do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post("/v1/messages") do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
+          end
         end
 
         handle_error_response(response) unless response.success?
@@ -375,11 +377,12 @@ module RubyPi
         # full body even though on_data consumed the chunks.
         error_body = +""
 
-        response = conn.post("/v1/messages") do |req|
-          req.headers["Content-Type"] = "application/json"
-          req.body = JSON.generate(body)
+        response = with_transport_errors do
+          conn.post("/v1/messages") do |req|
+            req.headers["Content-Type"] = "application/json"
+            req.body = JSON.generate(body)
 
-          # Use Faraday's on_data callback for real incremental streaming.
+            # Use Faraday's on_data callback for real incremental streaming.
           # Without this, Faraday buffers the entire response body before
           # returning, which means no deltas reach the caller until the model
           # finishes generating (fake streaming).
@@ -424,7 +427,8 @@ module RubyPi
               finish_reason = stream_state[:finish_reason]
             end
           end
-        end
+          end # conn.post
+        end # with_transport_errors
 
         # Check for HTTP errors. When on_data was active, the response body
         # was consumed by the callback, so we pass the accumulated error_body
