@@ -16,11 +16,14 @@ module RubyPi
     # Authentication errors are NOT retried with the fallback since they
     # indicate a configuration problem rather than a transient failure.
     #
-    # Issue #23: When streaming, the Fallback now buffers deltas from the
-    # primary provider. If the primary fails mid-stream, the buffered deltas
-    # are discarded and the fallback provider streams fresh from the start.
-    # This prevents the consumer from seeing partial output from the primary
-    # concatenated with the complete output from the fallback.
+    # Issue #23 + Issue #12: When streaming, events flow from the primary
+    # provider directly to the consumer in real time (no buffering), preserving
+    # the streaming UX on the happy path. If the primary fails mid-stream, a
+    # :fallback_start StreamEvent is emitted before the fallback takes over, so
+    # the consumer can discard any partial output already rendered from the
+    # failed primary. (The agent loop translates :fallback_start into a
+    # :provider_fallback event; raw Fallback consumers should handle
+    # :fallback_start themselves.)
     #
     # @example Setting up a fallback chain
     #   primary  = RubyPi::LLM.model(:gemini, "gemini-2.0-flash")

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-05-28
+
+### Fixed (adversarial review round 5)
+
+- **Compaction produced an Anthropic-invalid leading `:assistant` message (Critical)**: The 0.1.6 orphan-`:tool` strip fixed tool-result splitting but left the summary-role logic (`first_preserved == :assistant ? :user : :assistant`) intact. Whenever the first preserved message was `:user` (multi-turn reuse) or the preserved window emptied out (all tool results), the summary became an `:assistant` message at the head of the conversation — which Anthropic rejects with HTTP 400 "first message must use the 'user' role". The summary is now **always** a `:user` message (valid as the first message and never overwriting the system prompt). When the first preserved message is itself `:user`, the summary is merged into it to avoid consecutive same-role messages; an empty preserved window yields a lone `:user` summary. Extracted into `Compaction#build_compacted_history`
+- **Compaction dead "mirror case" branch removed (Minor)**: The 0.1.6 `if droppable.last … && preserved.first[:role] == :tool` block was unreachable — the preceding `while` loop guarantees `preserved.first` is never `:tool`. Removed it (the originating assistant message is already in droppable alongside its now-moved tool results, so the pair is never split), eliminating misleading dead code
+- **Deterministic `ProviderError` was retried with backoff (Minor)**: 0.1.6 added `RubyPi::ProviderError` to the retryable set in `BaseProvider#complete`, but provider errors are overwhelmingly deterministic request-construction failures (missing `tool_call_id`, invalid tool-argument JSON) raised before any HTTP call — retrying only burned the backoff schedule before re-raising the identical error. `ProviderError` is no longer retried. Fallback failover is unaffected (it rescues the `RubyPi::Error` superclass)
+- **Lifecycle hooks saw string-keyed tool arguments while events saw symbols (Minor)**: `before_tool_call`/`after_tool_call` received the raw `ToolCall` (string-keyed `arguments`) while the `:tool_execution_start` event and `tool_calls_made` carried symbol keys — so a hook and an event subscriber disagreed on the key type for the same call. `Loop#act` now rebuilds each `ToolCall` with symbol-keyed arguments up front, so hooks, events, `tool_calls_made`, and the tool block all observe the identical shape
+- **Anthropic streaming `finish_reason` could be clobbered to nil (Minor)**: A trailing `message_delta` event without a `stop_reason` overwrote the previously captured value, yielding a `Response` with no `finish_reason`. The assignment is now guarded (`finish_reason = delta["stop_reason"] if delta["stop_reason"]`), matching the OpenAI/Gemini guards
+- **Gemini `finishReason` assumed a String (Minor)**: `finishReason.downcase` would raise `NoMethodError` on a non-String payload mid-stream. Both the streaming and standard paths now coerce via `to_s` before `downcase`, and remain consistent with each other
+- **Dead streamed-content accumulator removed (Cleanup)**: `Loop#think` accumulated `streamed_content` that was never read (the recorded assistant message uses `Response#content`); the `.clear` on `:fallback_start` was a no-op and its comment was inaccurate. Removed the local; the `:provider_fallback` event still fires
+- **`Fallback` class docstring corrected (Docs)**: The class-level docstring still described the removed happy-path buffering ("the Fallback now buffers deltas… buffered deltas are discarded"), contradicting the real-time direct-streaming implementation. Updated to describe direct streaming plus the `:fallback_start` signal
+
+### Investigated, no change
+
+- **Streaming HTTP error bodies via `env.status`**: A prior review raised that streaming error responses might lose their body if Faraday's `on_data` callback received a nil `env.status`. Verified against the actual stack (faraday 2.14.1 / faraday-net_http 3.3.0): the net_http adapter calls `save_http_response` (which sets `env.status`) before `response.read_body` streams chunks, and `Env#stream_response` passes that same populated `env` to the user's `on_data` proc. `env.status` is therefore reliably available before the first chunk, so the existing `error_body` recovery works. No fix needed
+
 ## [0.1.6] - 2026-05-01
 
 ### Fixed (adversarial review round 4)

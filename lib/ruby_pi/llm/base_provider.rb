@@ -78,7 +78,16 @@ module RubyPi
         rescue RubyPi::AuthenticationError
           # Authentication errors are not retryable — raise immediately
           raise
-        rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError, RubyPi::ProviderError => e
+        rescue RubyPi::RateLimitError, RubyPi::ApiError, RubyPi::TimeoutError => e
+          # NOTE: RubyPi::ProviderError is intentionally NOT retried. Provider
+          # errors are overwhelmingly deterministic request-construction
+          # failures (missing tool_call_id, invalid tool-argument JSON, missing
+          # tool name) raised by build_request_body BEFORE any HTTP call. They
+          # produce the identical error on every attempt, so retrying only
+          # burns the backoff schedule before surfacing the same failure.
+          # Fallback wrappers still rescue RubyPi::Error (the ProviderError
+          # superclass), so provider failover is unaffected.
+          #
           # Retry up to max_retries times AFTER the initial attempt.
           # With max_retries: 3, attempt goes 1 (initial), 2, 3, 4 — the condition
           # `attempt <= @max_retries` allows retries on attempts 1..3, so we get
