@@ -562,7 +562,12 @@ module RubyPi
 
         when "message_delta"
           delta = data["delta"] || {}
-          finish_reason = delta["stop_reason"]
+          # Only overwrite finish_reason when this delta actually carries a
+          # stop_reason. Anthropic emits the stop_reason on a single
+          # message_delta near the end of the stream; a later message_delta
+          # without one must not clobber the captured value back to nil
+          # (which would yield a Response with no finish_reason).
+          finish_reason = delta["stop_reason"] if delta["stop_reason"]
           if data.key?("usage")
             usage_info = data["usage"]
             usage_data[:completion_tokens] = usage_info["output_tokens"]

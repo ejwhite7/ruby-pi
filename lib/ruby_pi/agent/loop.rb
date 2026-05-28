@@ -145,17 +145,16 @@ module RubyPi
         # Build tools array for the LLM
         tools = build_tools_array
 
-        # Accumulate streamed content
-        streamed_content = +""
-
-        # Call the LLM with streaming
+        # Call the LLM with streaming. The recorded assistant message uses
+        # the returned Response#content (already the final, authoritative
+        # text), so there is no need to accumulate deltas here — we only
+        # re-emit them for subscribers.
         response = @state.model.complete(
           messages: messages,
           tools: tools,
           stream: true
         ) do |event|
           if event.text_delta?
-            streamed_content << event.data.to_s
             @emitter.emit(:text_delta, content: event.data)
           elsif event.tool_call_delta?
             # Emit tool call delta events so subscribers can observe partial
@@ -164,12 +163,11 @@ module RubyPi
             @emitter.emit(:tool_call_delta, data: event.data)
           elsif event.fallback_start?
             # The primary LLM provider failed mid-stream and a Fallback
-            # provider is now taking over. Discard the partial text we
-            # accumulated from the failed primary so the agent's recorded
-            # response reflects only the fallback's output, and surface a
-            # :provider_fallback event so subscribers can clear any UI
-            # state they rendered from the discarded primary deltas.
-            streamed_content.clear
+            # provider is now taking over. Surface a :provider_fallback event
+            # so subscribers can clear any UI state they rendered from the
+            # discarded primary deltas. The recorded response is unaffected:
+            # it comes from the fallback provider's returned Response#content,
+            # never from the failed primary's partial text.
             @emitter.emit(:provider_fallback, **event.data)
           end
         end
@@ -208,32 +206,39 @@ module RubyPi
           timeout: @tool_timeout
         )
 
-        # Symbolize the JSON-parsed (string-keyed) tool_call arguments once,
-        # up front. Both the executor (which actually invokes the tool block)
-        # and the recorded `tool_calls_made` payload use this symbol-keyed
-        # form, keeping a single consistent shape across the pipeline rather
-        # than mixing string keys (raw from JSON) and symbol keys (post-
-        # symbolize) in different places.
-        symbolized = response.tool_calls.map do |tc|
-          RubyPi::Tools::Executor.deep_symbolize_keys(tc.arguments)
+        # Normalize each tool call's arguments to symbol keys ONCE, up front,
+        # by rebuilding the ToolCall objects. Every downstream consumer — the
+        # executor (which invokes the tool block), the before/after_tool_call
+        # hooks (which receive the ToolCall directly), the emitted
+        # :tool_execution_start event, and the recorded `tool_calls_made`
+        # payload — then observes the identical symbol-keyed shape. Carrying
+        # the symbolized form on the ToolCall itself (rather than in a side
+        # array) is what keeps the hooks consistent with everything else;
+        # previously hooks saw raw string keys while events/records saw symbols.
+        tool_calls = response.tool_calls.map do |tc|
+          RubyPi::LLM::ToolCall.new(
+            id: tc.id,
+            name: tc.name,
+            arguments: RubyPi::Tools::Executor.deep_symbolize_keys(tc.arguments)
+          )
         end
 
         # Prepare call hashes for the executor
-        calls = response.tool_calls.each_with_index.map do |tc, idx|
-          { name: tc.name, arguments: symbolized[idx] }
+        calls = tool_calls.map do |tc|
+          { name: tc.name, arguments: tc.arguments }
         end
 
         # Fire before_tool_call hooks and emit start events
-        response.tool_calls.each_with_index do |tc, idx|
+        tool_calls.each do |tc|
           @state.before_tool_call&.call(tc)
-          @emitter.emit(:tool_execution_start, tool_name: tc.name, arguments: symbolized[idx])
+          @emitter.emit(:tool_execution_start, tool_name: tc.name, arguments: tc.arguments)
         end
 
         # Execute all tool calls
         results = executor.execute(calls)
 
         # Fire after_tool_call hooks, emit end events, and add results to messages
-        response.tool_calls.each_with_index do |tc, idx|
+        tool_calls.each_with_index do |tc, idx|
           result = results[idx]
 
           @state.after_tool_call&.call(tc, result)
@@ -247,7 +252,7 @@ module RubyPi
           # arguments so callers see the same shape the tool itself received.
           @tool_calls_made << {
             tool_name: tc.name,
-            arguments: symbolized[idx],
+            arguments: tc.arguments,
             result: result.to_h
           }
 

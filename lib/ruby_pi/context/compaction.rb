@@ -87,34 +87,22 @@ module RubyPi
         # call but keep the matching tool_result, the API rejects the
         # request with "tool_result without preceding tool_use".
         #
-        # The boundary between droppable and preserved can split a tool
-        # exchange in two ways:
-        #   (a) preserved starts with one or more :tool messages whose
-        #       matching assistant turn is in droppable. Strip those
-        #       orphan tool messages from the head of preserved (move
-        #       them into droppable so they are summarized, not sent).
-        #   (b) the last droppable message is an :assistant with tool_calls,
-        #       but its matching :tool result(s) are in preserved. Pull
-        #       that assistant message back into preserved so the pair
-        #       stays intact.
-        #
-        # We apply (a) first: it's the common case (preserve_last_n=4 cuts
-        # mid-pair, leaving a stranded tool message). Then (b) catches the
-        # mirror case.
+        # When the boundary between droppable and preserved cuts mid-exchange,
+        # preserved can start with one or more orphan :tool messages whose
+        # matching assistant turn is in droppable. Strip those off the head of
+        # preserved and move them into droppable so they are summarized away
+        # rather than sent. Because the originating assistant message is older,
+        # it is already in droppable, so the pair stays together there — there
+        # is no mirror case to handle (once a tool result is moved across, its
+        # assistant is never left stranded on the preserved side).
         while preserved.first && preserved.first[:role] == :tool
           droppable << preserved.shift
         end
 
-        if droppable.last &&
-           droppable.last[:role] == :assistant &&
-           droppable.last[:tool_calls].is_a?(Array) &&
-           !droppable.last[:tool_calls].empty? &&
-           preserved.first && preserved.first[:role] == :tool
-          preserved.unshift(droppable.pop)
-        end
-
-        # After the boundary fix-ups, droppable may have become empty.
-        return nil if droppable.empty?
+        # The orphan-strip only moves messages INTO droppable, so droppable
+        # cannot have shrunk; it is still non-empty here. preserved, however,
+        # may now be empty (the whole window was tool results) — the summary
+        # construction below handles that case.
 
         # Generate a summary of the dropped messages
         summary = summarize(droppable)
@@ -122,28 +110,42 @@ module RubyPi
         # Emit compaction event if an emitter is available
         @emitter&.emit(:compaction, dropped_count: droppable.size, summary: summary)
 
-        # Build the compacted history: summary message + preserved.
-        #
-        # The summary role MUST NOT be :system (that would overwrite the real
-        # system prompt on Anthropic, which extracts the last :system message
-        # as the top-level `system:` parameter).
-        #
-        # The summary role must also NOT match the role of the first preserved
-        # message — consecutive same-role messages are rejected by Anthropic.
-        # We pick :user when the next preserved message is :assistant, and
-        # :assistant otherwise (covers :user, :tool, and an empty preserved).
-        # On Anthropic, :tool messages become role :user with tool_result
-        # blocks, so :assistant is the safe choice when the next message is
-        # :tool too.
-        first_preserved_role = preserved.first&.dig(:role)
-        summary_role = first_preserved_role == :assistant ? :user : :assistant
+        build_compacted_history(summary, preserved)
+      end
 
-        summary_message = {
-          role: summary_role,
-          content: "[Conversation Summary]\n#{summary}"
-        }
+      # Builds the compacted history: a summary message followed by the
+      # preserved tail.
+      #
+      # The summary becomes the FIRST message of the compacted history, so it
+      # must satisfy the strictest provider constraints (Anthropic):
+      #   1. The summary role MUST NOT be :system — that would overwrite the
+      #      real system prompt on Anthropic, which promotes the last :system
+      #      message to the top-level `system:` parameter.
+      #   2. The first message MUST use role :user.
+      #   3. Consecutive same-role messages are rejected.
+      #
+      # A :user summary satisfies (1) and (2). For (3): the orphan-strip above
+      # guarantees the first preserved message is :assistant, :user, or absent
+      # (never :tool). When it is :assistant or absent, a standalone :user
+      # summary alternates correctly. When it is :user, a separate :user
+      # summary would create two consecutive user messages, so we instead
+      # merge the summary text into that existing user message — keeping the
+      # first message a single :user message with no role collision.
+      #
+      # @param summary [String] the generated summary text
+      # @param preserved [Array<Hash>] the preserved tail of messages
+      # @return [Array<Hash>] the compacted history
+      def build_compacted_history(summary, preserved)
+        summary_text = "[Conversation Summary]\n#{summary}"
+        first_preserved = preserved.first
 
-        [summary_message] + preserved
+        if first_preserved && first_preserved[:role] == :user
+          merged = first_preserved.dup
+          merged[:content] = "#{summary_text}\n\n#{first_preserved[:content]}"
+          [merged] + preserved.drop(1)
+        else
+          [{ role: :user, content: summary_text }] + preserved
+        end
       end
 
       # Estimates the total token count for a system prompt and message array

@@ -115,22 +115,30 @@ RSpec.describe RubyPi::Context::Compaction do
 
       it "preserves the last N messages" do
         result = compaction.compact(messages, system_prompt)
-        # preserve_last_n is 2, so last 2 messages should be preserved
+        # preserve_last_n is 2, so the last 2 messages' content is retained.
+        # Here the first preserved message is a :user message, so the summary
+        # is merged into it (to keep a single leading :user message) rather
+        # than prepended separately — its content gains the summary but still
+        # carries the original preserved text.
         preserved = result.last(2)
-        expect(preserved[0][:content]).to eq(long_content)
+        expect(preserved[0][:content]).to include(long_content)
         expect(preserved[1][:content]).to eq("Final response")
       end
 
-      it "prepends a summary message with role :assistant (not :system or :user)" do
+      it "prepends a summary as a :user message valid as the first Anthropic message" do
         result = compaction.compact(messages, system_prompt)
         summary_msg = result.first
-        # The summary message must use role :assistant to:
-        # 1. Prevent overwriting the actual system prompt in providers like Anthropic
-        #    that extract system messages into a top-level parameter (last one wins).
-        # 2. Avoid consecutive user messages, which Anthropic's API rejects (it
-        #    requires strict user/assistant alternation).
-        # An assistant summarizing prior conversation is also semantically correct.
-        expect(summary_msg[:role]).to eq(:assistant)
+        # The summary must use role :user, NOT :system or :assistant:
+        # 1. :system would overwrite the real system prompt on Anthropic
+        #    (which promotes the last :system message to the top-level param).
+        # 2. The first message in the conversation MUST be a :user message on
+        #    Anthropic — a leading :assistant message is rejected with HTTP 400
+        #    "first message must use the 'user' role".
+        # When the first preserved message is itself :user (as in this fixture),
+        # the summary is merged into it so there is exactly one leading :user
+        # message — satisfying both the first-must-be-user and no-consecutive-
+        # same-role constraints.
+        expect(summary_msg[:role]).to eq(:user)
         expect(summary_msg[:content]).to include("Summary of earlier conversation.")
         expect(summary_msg[:content]).to include("[Conversation Summary]")
       end

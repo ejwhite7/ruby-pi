@@ -375,8 +375,11 @@ module RubyPi
               # Parse the actual finish reason from the streaming response
               # instead of hardcoding "stop". Gemini sends finishReason in
               # the candidate object (e.g., "STOP", "MAX_TOKENS", "SAFETY").
+              # Coerce via to_s before downcase so a non-String payload can
+              # never raise NoMethodError mid-stream (mirrors the &.to_s in
+              # the non-streaming parse path).
               if candidate["finishReason"]
-                finish_reason = candidate["finishReason"].downcase
+                finish_reason = candidate["finishReason"].to_s.downcase
               end
 
               # Capture usage metadata if present
@@ -450,8 +453,10 @@ module RubyPi
           }
         end
 
-        # Map Gemini finish reason to normalized string
-        finish_reason = candidate["finishReason"]&.downcase
+        # Map Gemini finish reason to normalized string. to_s guards against
+        # a non-String payload (mirrors the streaming path); &. keeps a
+        # missing finishReason as nil.
+        finish_reason = candidate["finishReason"]&.to_s&.downcase
 
         Response.new(
           content: content,

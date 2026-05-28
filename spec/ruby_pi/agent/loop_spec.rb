@@ -516,5 +516,41 @@ RSpec.describe RubyPi::Agent::Loop do
       expect(recorded).to eq(city: "NYC", options: { units: "F" })
       expect(received_args).to eq(recorded)
     end
+
+    it "passes symbol-keyed arguments to before_tool_call/after_tool_call hooks" do
+      # The lifecycle hooks receive the ToolCall directly. Their arguments
+      # must be symbol-keyed too — matching the tool block, the
+      # :tool_execution_start event, and tool_calls_made — so a hook and an
+      # event subscriber never disagree on the key type for the same call.
+      state.add_message(role: :user, content: "Run")
+
+      before_args = nil
+      after_args = nil
+      state.before_tool_call = ->(tc) { before_args = tc.arguments }
+      state.after_tool_call = ->(tc, _result) { after_args = tc.arguments }
+
+      block_args = nil
+      registry.register(
+        RubyPi::Tools::Definition.new(
+          name: :hook_keys,
+          description: "Captures its args",
+          parameters: { type: "object", properties: {} }
+        ) { |args| block_args = args; "ok" }
+      )
+
+      # Providers hand back string-keyed JSON-parsed arguments.
+      allow(model).to receive(:complete).and_return(
+        tool_call_response([{ id: "c1", name: "hook_keys", arguments: { "city" => "NYC" } }]),
+        stop_response(content: "done")
+      )
+
+      loop_runner = described_class.new(state: state, emitter: emitter)
+      result = loop_runner.run
+
+      expect(before_args).to eq(city: "NYC")
+      expect(after_args).to eq(city: "NYC")
+      expect(block_args).to eq(city: "NYC")
+      expect(result.tool_calls_made.first[:arguments]).to eq(city: "NYC")
+    end
   end
 end
